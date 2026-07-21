@@ -29,9 +29,7 @@ async def handle_business_connection(connection: BusinessConnection):
         try:
             await bot.send_message(
                 chat_id=user_id,
-                text="🚀 **Бот подключен!**\n\n"
-                     "Теперь я успешно интегрирован в ваши чаты. Я буду отслеживать "
-                     "удаления, изменения сообщений и выполнять команды вроде `.mute` и `.afk`.",
+                text="🚀 **Бот подключен!**\n\nТеперь я успешно интегрирован в ваши чаты. Я буду отслеживать удаления, изменения сообщений и выполнять команды.",
                 parse_mode="Markdown"
             )
             logging.info(f"Пользователь {user_id} подключил соединение {conn_id}")
@@ -42,14 +40,11 @@ async def handle_business_connection(connection: BusinessConnection):
         try:
             await bot.send_message(
                 chat_id=user_id,
-                text="⚠️ **Бот отключен**\n\n"
-                     "Вы отключили автоматизацию чатов для этого аккаунта. Я больше не "
-                     "вижу изменения в диалогах.",
+                text="⚠️ **Бот отключен**\n\nВы отключили автоматизацию чатов для этого аккаунта.",
                 parse_mode="Markdown"
             )
             logging.info(f"Пользователь {user_id} отключил соединение {conn_id}")
             
-            # Принудительная очистка кэша для оптимизации памяти RAM
             connection_owners.pop(conn_id, None)
             business_msg_history.pop(conn_id, None)
             keys_to_remove = [k for k in muted_users.keys() if k == conn_id]
@@ -69,11 +64,11 @@ async def cmd_start(message: Message):
         "• Ответом на сообщение человека:\n"
         "  ` .mute ` — включить автоудаление его реплик.\n"
         "  ` .unmute ` — снять блокировку реплик.\n"
-        "  ` .note ` — сохранить это сообщение в Избранное (в ЛС бота).\n\n"
+        "  ` .note ` — сохранить это сообщение в Избранное.\n\n"
         "• Обычным текстом в любом месте чата:\n"
-        "  ` .afk [причина] ` — автоответчик (например: `.afk Сплю`).\n"
-        "  ` .unafk ` — выключить режим автоответчика.\n"
-        "  ` .read ` — принудительно пометить текущий чат прочитанным.\n",
+        "  ` .afk [причина] ` — автоответчик.\n"
+        "  ` .unafk ` — выключить автоответчик.\n"
+        "  ` .read ` — принудительно прочесть чат.\n",
         parse_mode="Markdown"
     )
 
@@ -120,10 +115,13 @@ async def handle_business_commands(message: Message):
     conn_id = message.business_connection_id
     chat_id = message.chat.id
     
-    # ИСПРАВЛЕНО: Безопасное разбиение текста на команду и аргументы
+    # ИСПРАВЛЕНО: Безопасное разделение текста и перевод первого элемента (строки) в нижний регистр
     text_parts = message.text.strip().split(maxsplit=1)
-    command = text_parts.lower()  # Обращаемся строго к строке, а не к списку
-    args = text_parts if len(text_parts) > 1 else ""
+    if not text_parts:
+        return
+        
+    command = text_parts[0].lower()  # Берем СТРОКУ из списка и применяем .lower()
+    args = text_parts[1] if len(text_parts) > 1 else ""
 
     owner_id = connection_owners.get(conn_id)
     if not owner_id:
@@ -140,11 +138,11 @@ async def handle_business_commands(message: Message):
                 await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[message.message_id])
                 await bot.send_message(
                     chat_id=owner_id,
-                    text=f"🔇 **Пользователь {target_username} замучен в чате {chat_id}**\nВсе новые реплики будут стираться автоматически.",
+                    text=f"🔇 **Пользователь {target_username} замучен в чате {chat_id}**\nНовые сообщения будут удаляться.",
                     parse_mode="Markdown"
                 )
             except Exception as e:
-                logging.error(f"Критический сбой .mute: {e}")
+                logging.error(f"Сбой .mute: {e}")
             return
 
         elif command == ".unmute":
@@ -153,11 +151,11 @@ async def handle_business_commands(message: Message):
                 await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[message.message_id])
                 await bot.send_message(
                     chat_id=owner_id,
-                    text=f"🔊 **Мут с пользователя {target_username} в чате {chat_id} успешно снят**",
+                    text=f"🔊 **Мут с пользователя {target_username} в чате {chat_id} снят**",
                     parse_mode="Markdown"
                 )
             except Exception as e:
-                logging.error(f"Критический сбой .unmute: {e}")
+                logging.error(f"Сбой .unmute: {e}")
             return
 
         elif command == ".note":
@@ -170,7 +168,7 @@ async def handle_business_commands(message: Message):
                 )
                 await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[message.message_id])
             except Exception as e:
-                logging.error(f"Критический сбой .note: {e}")
+                logging.error(f"Сбой .note: {e}")
             return
 
     # --- САМОСТОЯТЕЛЬНЫЕ ИЗОЛИРОВАННЫЕ КОМАНДЫ ---
@@ -181,11 +179,11 @@ async def handle_business_commands(message: Message):
             await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[message.message_id])
             await bot.send_message(
                 chat_id=owner_id,
-                text=f"💤 **Режим \"Не беспокоить\" успешно активирован**\nПричина: _{reason}_",
+                text=f"💤 **Режим \"Не беспокоить\" активирован**\nПричина: _{reason}_",
                 parse_mode="Markdown"
             )
         except Exception as e:
-            logging.error(f"Критический сбой .afk: {e}")
+            logging.error(f"Сбой .afk: {e}")
 
     elif command == ".unafk":
         afk_status.pop(owner_id, None)
@@ -193,18 +191,18 @@ async def handle_business_commands(message: Message):
             await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[message.message_id])
             await bot.send_message(
                 chat_id=owner_id,
-                text="🟢 **Режим \"Не беспокоить\" успешно деактивирован**",
+                text="🟢 **Режим \"Не беспокоить\" деактивирован**",
                 parse_mode="Markdown"
             )
         except Exception as e:
-            logging.error(f"Критический сбой .unafk: {e}")
+            logging.error(f"Сбой .unafk: {e}")
 
     elif command == ".read":
         try:
             await bot.read_business_message(business_connection_id=conn_id, chat_id=chat_id, message_id=message.message_id)
             await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[message.message_id])
         except Exception as e:
-            logging.error(f"Не удалось принудительно прочесть чат: {e}")
+            logging.error(f"Не удалось прочесть чат: {e}")
 
 
 # 5. Детектор модификации и редактирования текстовых сообщений
