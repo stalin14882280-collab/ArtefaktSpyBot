@@ -31,11 +31,12 @@ async def handle_business_connection(connection: BusinessConnection):
                 chat_id=user_id,
                 text="🚀 **Бот подключен!**\n\n"
                      "Теперь я успешно интегрирован в ваши чаты. Я буду отслеживать "
-                     "удаления, изменения сообщений и выполнять команды вроде `.mute` и `.afk`."
+                     "удаления, изменения сообщений и выполнять команды вроде `.mute` и `.afk`.",
+                parse_mode="Markdown"
             )
             logging.info(f"Пользователь {user_id} подключил бизнес-соединение {conn_id}")
         except Exception as e:
-            logging.error(f"Не удалось отправить уведомление о подключении пользователю {user_id}: {e}")
+            logging.error(f"Не удалось отправить уведомление о подключении: {e}")
             
     else:
         try:
@@ -43,21 +44,22 @@ async def handle_business_connection(connection: BusinessConnection):
                 chat_id=user_id,
                 text="⚠️ **Бот отключен**\n\n"
                      "Вы отключили автоматизацию чатов для этого аккаунта. Я больше не "
-                     "вижу изменения в диалогах и не обрабатываю ваши команды."
+                     "вижу изменения в диалогах.",
+                parse_mode="Markdown"
             )
             logging.info(f"Пользователь {user_id} отключил бизнес-соединение {conn_id}")
             
             connection_owners.pop(conn_id, None)
             business_msg_history.pop(conn_id, None)
-            keys_to_remove = [k for k in muted_users.keys() if k == conn_id]
+            keys_to_remove = [k for k in muted_users.keys() if k[0] == conn_id]
             for key in keys_to_remove:
                 muted_users.pop(key, None)
                 
         except Exception as e:
-            logging.error(f"Не удалось отправить уведомление об отключении пользователю {user_id}: {e}")
+            logging.error(f"Не удалось отправить уведомление об отключении: {e}")
 
 
-# 2. Приветственное сообщение при старте бота в ЛС (С ПРАВИЛЬНЫМ ФОРМАТИРОВАНИЕМ)
+# 2. Приветственное сообщение при старте бота в ЛС
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
@@ -82,26 +84,31 @@ async def handle_business_message(message: Message):
     chat_id = message.chat.id
     user_id = message.from_user.id
 
+    # Восстановление владельца сессии в случае перезапуска сервера
     if conn_id not in connection_owners:
         try:
             conn_info = await bot.get_business_connection(business_connection_id=conn_id)
             connection_owners[conn_id] = conn_info.user.id
         except Exception as e:
-            logging.error(f"Не удалось динамически получить владельца соединения: {e}")
+            logging.error(f"Не удалось получить владельца соединения: {e}")
 
+    # Блокировка и удаление сообщений пользователя в муте
     if muted_users.get((conn_id, chat_id)) == user_id:
         try:
             await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[message.message_id])
             return
         except Exception as e:
-            logging.error(f"Ошибка удаления: {e}")
+            logging.error(f"Ошибка удаления сообщения в муте: {e}")
 
-    for owner_id, reason in afk_status.items():
+    # Обработка AFK-автоответчика (только для входящих от других людей)
+    owner_id = connection_owners.get(conn_id)
+    if owner_id and user_id != owner_id and owner_id in afk_status:
         if message.text and not message.from_user.is_bot:
+            reason = afk_status[owner_id]
             afk_reply = f"🤖 [Автоответ] Сейчас я занят. Причина: *{reason}*"
             await bot.send_message(chat_id=chat_id, text=afk_reply, business_connection_id=conn_id, parse_mode="Markdown")
-            break
 
+    # Сохранение текста в историю
     if conn_id not in business_msg_history:
         business_msg_history[conn_id] = {}
     if message.text:
@@ -111,11 +118,15 @@ async def handle_business_message(message: Message):
 async def handle_business_commands(message: Message):
     conn_id = message.business_connection_id
     chat_id = message.chat.id
+    
+    # ИСПРАВЛЕНО: корректное разделение текста и перевод команды в нижний регистр
     text_parts = message.text.strip().split(maxsplit=1)
     command = text_parts[0].lower()
     args = text_parts[1] if len(text_parts) > 1 else ""
 
-    my_tg_id = message.from_user.id
+    owner_id = connection_owners.get(conn_id)
+    if not owner_id:
+        return
 
     # --- КОМАНДЫ С ОТВЕТОМ НА СООБЩЕНИЕ (REPLY) ---
     if message.reply_to_message:
@@ -126,7 +137,7 @@ async def handle_business_commands(message: Message):
             muted_users[(conn_id, chat_id)] = target_user_id
             await bot.edit_business_message(
                 business_connection_id=conn_id, chat_id=chat_id, message_id=message.message_id,
-                text=f"🔇 **Пользователь {target_username} замучен**"
+                text=f"🔇 **Пользователь {target_username} замучен**", parse_mode="Markdown"
             )
             return
 
@@ -134,15 +145,15 @@ async def handle_business_commands(message: Message):
             muted_users.pop((conn_id, chat_id), None)
             await bot.edit_business_message(
                 business_connection_id=conn_id, chat_id=chat_id, message_id=message.message_id,
-                text=f"🔊 **Мут с пользователя {target_username} снят**"
+                text=f"🔊 **Мут с пользователя {target_username} снят**", parse_mode="Markdown"
             )
             return
 
         elif command == ".note":
             note_content = message.reply_to_message.text or "[Медиафайл]"
             await bot.send_message(
-                chat_id=my_tg_id,
-                text=f"📌 **Новая заметка из чата `{chat_id}`**:\n\n{note_content}"
+                chat_id=owner_id,
+                text=f"📌 **Новая заметка из чата `{chat_id}`**:\n\n{note_content}", parse_mode="Markdown"
             )
             await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[message.message_id])
             return
@@ -150,17 +161,17 @@ async def handle_business_commands(message: Message):
     # --- САМОСТОЯТЕЛЬНЫЕ КОМАНДЫ (БЕЗ REPLY) ---
     if command == ".afk":
         reason = args if args else "Отсутствую"
-        afk_status[my_tg_id] = reason
+        afk_status[owner_id] = reason
         await bot.edit_business_message(
             business_connection_id=conn_id, chat_id=chat_id, message_id=message.message_id,
             text=f"💤 **Режим \"Не беспокоить\" включен**\nПричина: _{reason}_", parse_mode="Markdown"
         )
 
     elif command == ".unafk":
-        afk_status.pop(my_tg_id, None)
+        afk_status.pop(owner_id, None)
         await bot.edit_business_message(
             business_connection_id=conn_id, chat_id=chat_id, message_id=message.message_id,
-            text="🟢 **Я вернулся! Режим \"Не беспокоить\" отключен**"
+            text="🟢 **Я вернулся! Режим \"Не беспокоить\" отключен**", parse_mode="Markdown"
         )
 
     elif command == ".read":
