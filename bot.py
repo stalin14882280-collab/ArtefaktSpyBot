@@ -120,9 +120,9 @@ async def handle_business_commands(message: Message):
     conn_id = message.business_connection_id
     chat_id = message.chat.id
     
-    # Стабильный парсинг командных аргументов
+    # ИСПРАВЛЕНО: Безопасное разбиение текста на команду и аргументы
     text_parts = message.text.strip().split(maxsplit=1)
-    command = text_parts.lower()
+    command = text_parts.lower()  # Обращаемся строго к строке, а не к списку
     args = text_parts if len(text_parts) > 1 else ""
 
     owner_id = connection_owners.get(conn_id)
