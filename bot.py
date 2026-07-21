@@ -149,7 +149,7 @@ async def handle_deleted_business_messages(deleted_messages: BusinessMessagesDel
             del user_msgs[msg_id]
 
 
-async main():
+async def main():
     print("ArtefaktSpyBot запущен. Модуль мута активен!")
     await dp.start_polling(bot)
 
