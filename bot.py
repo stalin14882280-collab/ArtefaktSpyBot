@@ -22,38 +22,35 @@ afk_status = {}            # { user_id: reason_text } (Режим AFK)
 async def handle_business_connection(connection: BusinessConnection):
     user_id = connection.user.id
     
-    # Если бот успешно подключен в настройках
     if connection.is_enabled:
         try:
             await bot.send_message(
                 chat_id=user_id,
                 text="🚀 **Бот подключен!**\n\n"
-                     "Теперь я успешно intégré в ваши чаты. Я буду отслеживать "
+                     "Теперь я успешно интегрирован в ваши чаты. Я буду отслеживать "
                      "удаления, изменения сообщений и выполнять команды вроде `.mute` и `.afk`."
             )
             logging.info(f"Пользователь {user_id} подключил бизнес-соединение {connection.id}")
         except Exception as e:
-            logging.error(f"Не удалось отправить уведомление о подключении пользователю {user_id}: {e}")
+            logging.error(f"Не удалось отправить уведомление о подключении: {e}")
             
-    # Если бот был отключен пользователем
     else:
         try:
             await bot.send_message(
                 chat_id=user_id,
                 text="⚠️ **Бот отключен**\n\n"
                      "Вы отключили автоматизацию чатов для этого аккаунта. Я больше не "
-                     "вижу изменения в диалогах и не обрабатываю ваши команды."
+                     "вижу изменения в диалогах."
             )
             logging.info(f"Пользователь {user_id} отключил бизнес-соединение {connection.id}")
             
-            # Очищаем кэш сообщений и мутов для этого соединения, чтобы освободить память
             business_msg_history.pop(connection.id, None)
-            keys_to_remove = [k for k in muted_users.keys() if k[0] == connection.id]
+            keys_to_remove = [k for k in muted_users.keys() if k == connection.id]
             for key in keys_to_remove:
                 muted_users.pop(key, None)
                 
         except Exception as e:
-            logging.error(f"Не удалось отправить уведомление об отключении пользователю {user_id}: {e}")
+            logging.error(f"Не удалось отправить уведомление об отключении: {e}")
 
 
 # 2. Приветственное сообщение при старте бота в ЛС
@@ -108,8 +105,8 @@ async def handle_business_commands(message: Message):
     conn_id = message.business_connection_id
     chat_id = message.chat.id
     text_parts = message.text.strip().split(maxsplit=1)
-    command = text_parts[0].lower()
-    args = text_parts[1] if len(text_parts) > 1 else ""
+    command = text_parts.lower()
+    args = text_parts if len(text_parts) > 1 else ""
 
     my_tg_id = message.from_user.id
 
@@ -167,7 +164,7 @@ async def handle_business_commands(message: Message):
             logging.error(f"Не удалось прочитать чат: {e}")
 
 
-# 5. Детектор ИЗМЕНЕНИЙ сообщений
+# 5. Детектор ИЗМЕНЕНИЙ сообщений (ИСПРАВЛЕНО: шлет отчет владельцу бизнес-аккаунта)
 @dp.edited_business_message()
 async def handle_edited_business_message(message: Message):
     conn_id = message.business_connection_id
@@ -179,15 +176,25 @@ async def handle_edited_business_message(message: Message):
         
         if old_text != new_text:
             user_msgs[message.message_id] = new_text
-            log_text = (
-                f"🕵️‍♂️ **Изменено сообщение от {message.from_user.full_name}!**\n\n"
-                f"**Было:** {old_text}\n"
-                f"**Стало:** {new_text}"
-            )
-            await bot.send_message(chat_id=message.chat.id, text=log_text, parse_mode="Markdown")
+            
+            try:
+                # Динамически запрашиваем у Telegram данные о том, чей это бизнес-аккаунт
+                conn_info = await bot.get_business_connection(business_connection_id=conn_id)
+                owner_id = conn_info.user.id
+                
+                log_text = (
+                    f"🕵️‍♂️ **Изменено сообщение от {message.from_user.full_name}!**\n"
+                    f"🌐 **Чат**: `{message.chat.full_name or message.chat.id}`\n\n"
+                    f"**Было:** {old_text}\n"
+                    f"**Стало:** {new_text}"
+                )
+                # Отправляем лично вам в диалог с ботом
+                await bot.send_message(chat_id=owner_id, text=log_text, parse_mode="Markdown")
+            except Exception as e:
+                logging.error(f"Ошибка отправки лога изменения: {e}")
 
 
-# 6. Детектор УДАЛЕНИЙ сообщений
+# 6. Детектор УДАЛЕНИЙ сообщений (ИСПРАВЛЕНО: шлет отчет владельцу бизнес-аккаунта)
 @dp.deleted_business_messages()
 async def handle_deleted_business_messages(deleted_messages: BusinessMessagesDeleted):
     conn_id = deleted_messages.business_connection_id
@@ -196,11 +203,22 @@ async def handle_deleted_business_messages(deleted_messages: BusinessMessagesDel
     for msg_id in deleted_messages.message_ids:
         if msg_id in user_msgs:
             old_text = user_msgs[msg_id]
-            log_text = (
-                f"🗑 **Удалено сообщение в чате!**\n\n"
-                f"**Было:** {old_text}"
-            )
-            await bot.send_message(chat_id=deleted_messages.chat.id, text=log_text, parse_mode="Markdown")
+            
+            try:
+                # Динамически узнаем владельца сессии автоматизации
+                conn_info = await bot.get_business_connection(business_connection_id=conn_id)
+                owner_id = conn_info.user.id
+                
+                log_text = (
+                    f"🗑 **Удалено сообщение в чате!**\n"
+                    f"🌐 **ID чата**: `{deleted_messages.chat.id}`\n\n"
+                    f"**Было:** {old_text}"
+                )
+                # Отправляем лично вам в диалог с ботом, а не в исходный чат
+                await bot.send_message(chat_id=owner_id, text=log_text, parse_mode="Markdown")
+            except Exception as e:
+                logging.error(f"Ошибка отправки лога удаления: {e}")
+                
             del user_msgs[msg_id]
 
 
