@@ -5,7 +5,7 @@ from aiogram.types import Message, BusinessMessagesDeleted
 from aiogram.filters import CommandStart
 
 # Токен вашего @ArtefaktSpyBot из @BotFather
-BOT_TOKEN = "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+BOT_TOKEN = "8689486048:AAFkgdmV4ZTtL8gAkfmEjWeXkrAufMM42kI"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
