@@ -57,7 +57,7 @@ async def handle_business_connection(connection: BusinessConnection):
             logging.error(f"Не удалось отправить уведомление об отключении пользователю {user_id}: {e}")
 
 
-# 2. Приветственное сообщение при старте бота в ЛС
+# 2. Приветственное сообщение при старте бота в ЛС (С ПРАВИЛЬНЫМ ФОРМАТИРОВАНИЕМ)
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
@@ -70,7 +70,8 @@ async def cmd_start(message: Message):
         "• Обычным текстом в любом месте чата:\n"
         "  ` .afk [причина] ` — автоответчик (например: `.afk Сплю`).\n"
         "  ` .unafk ` — выключить режим автоответчика.\n"
-        "  ` .read ` — принудительно пометить текущий чат прочитанным.\n"
+        "  ` .read ` — принудительно пометить текущий чат прочитанным.\n",
+        parse_mode="Markdown"
     )
 
 
