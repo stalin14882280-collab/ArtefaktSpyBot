@@ -1,3 +1,4 @@
+import os
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, F
@@ -11,14 +12,15 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Внутреннее хранилище данных в оперативной памяти (RAM)
+# Внутреннее хранилище в оперативной памяти сервера (RAM)
 connection_owners = {}     # Карта соответствий { business_connection_id: user_id }
-business_msg_history = {}  # Кэш истории переписок { conn_id: { message_id: text } }
-muted_users = {}           # Списки замученных людей { (conn_id, chat_id): target_user_id }
-afk_status = {}            # Статусы режима AFK { user_id: reason_text }
+business_msg_history = {}  # Кэш истории текстовых сообщений { conn_id: { message_id: text } }
+
+# Создаем временную папку для сохранения одноразовых медиафайлов
+os.makedirs("downloads", exist_ok=True)
 
 
-# 1. Отслеживание подключения и отключения бота от бизнес-аккаунта (Вход в 1 клик)
+# 1. Отслеживание подключения бота к бизнес-аккаунту (Вход в 1 клик)
 @dp.business_connection()
 async def handle_business_connection(connection: BusinessConnection):
     user_id = connection.user.id
@@ -29,7 +31,7 @@ async def handle_business_connection(connection: BusinessConnection):
         try:
             await bot.send_message(
                 chat_id=user_id,
-                text="🚀 **ArtefaktSpyBot успешно подключен автоматически!**\n\nЯ интегрирован в ваши чаты. Теперь вы можете использовать команды `.spam`, `.mute` и `.afk`.",
+                text="🚀 **ArtefaktSpyBot успешно подключен!**\n\nЯ начал скрытый мониторинг ваших чатов. Теперь все удаленные сообщения, изменения текста и одноразовые медиафайлы (фото/видео) будут пересылаться сюда.",
                 parse_mode="Markdown"
             )
         except Exception as e:
@@ -51,17 +53,17 @@ async def handle_business_connection(connection: BusinessConnection):
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
-        "👋 Привет! Я **ArtefaktSpyBot** в режиме Автоматизации.\n\n"
-        "📜 **Доступные команды в ваших бизнес-чатах:**\n"
-        "• ` .spam [текст] [кол-во] ` — запустить массовую отправку.\n"
-        "• ` .mute ` *(ответом на сообщение человека)* — удалять его новые реплики.\n"
-        "• ` .unmute ` *(ответом на сообщение человека)* — снять мут.\n"
-        "• ` .afk [причина] ` — включить автоответчик.\n",
+        "👋 Привет! Я **ArtefaktSpyBot**.\n\n"
+        "Я работаю полностью в фоновом режиме через функцию **Автоматизации чатов**.\n"
+        "Просто подключите меня в настройках Telegram, и я буду присылать сюда:\n"
+        "• Удаленные сообщения\n"
+        "• Измененные сообщения (Было / Стало)\n"
+        "• Скрытые одноразовые фото и видео, которые отправляют собеседники",
         parse_mode="Markdown"
     )
 
 
-# 3. Базовый перехватчик сообщений (Слежка, Мут и логика AFK)
+# 3. Базовый перехватчик входящего бизнес-потока (Сбор истории + Перехват одноразовых медиа)
 @dp.business_message()
 async def handle_business_message(message: Message):
     conn_id = message.business_connection_id
@@ -73,183 +75,112 @@ async def handle_business_message(message: Message):
             conn_info = await bot.get_business_connection(business_connection_id=conn_id)
             connection_owners[conn_id] = conn_info.user.id
         except Exception as e:
-            logging.error(f"Не удалось восстановить сессию: {e}")
-
-    # Мгновенное автоматическое удаление входящих сообщений от замученного пользователя
-    if muted_users.get((conn_id, chat_id)) == user_id:
-        try:
-            await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[message.message_id])
-            return
-        except Exception as e:
-            logging.error(f"Ошибка автоудаления в муте: {e}")
-
-    # Исполнение автоответа в режиме AFK
-    owner_id = connection_owners.get(conn_id)
-    if owner_id and user_id != owner_id and owner_id in afk_status:
-        if message.text and not message.from_user.is_bot:
-            reason = afk_status[owner_id]
-            afk_reply = f"🤖 [Автоответ] Сейчас я занят. Причина: *{reason}*"
-            await bot.send_message(chat_id=chat_id, text=afk_reply, business_connection_id=conn_id, parse_mode="Markdown")
-
-    if conn_id not in business_msg_history:
-        business_msg_history[conn_id] = {}
-    if message.text:
-        business_msg_history[conn_id][message.message_id] = message.text
-# 4. Модуль обработки префиксных точечных команд управления
-@dp.business_message(F.text.startswith("."))
-async def handle_business_commands(message: Message):
-    conn_id = message.business_connection_id
-    chat_id = message.chat.id
-    
-    # Безопасный разбор текста на команду и аргументы
-    raw_text = message.text.strip()
-    text_parts = raw_text.split()
-    if not text_parts:
-        return
-        
-    command = text_parts.lower()
+            logging.error(f"Не удалось восстановить сессию владельца: {e}")
 
     owner_id = connection_owners.get(conn_id)
     if not owner_id:
         return
 
-    # Функция удаления самой команды из чата
-    async def delete_cmd():
-        try:
-            await bot.delete_business_messages(business_connection_id=conn_id, message_ids=[message.message_id])
-        except Exception:
-            pass
+    # --- ФУНКЦИЯ ПЕРЕХВАТА ОДНОРАЗОВЫХ ФОТО И ВИДЕО (VIEW ONCE) ---
+    # Проверяем, содержит ли сообщение скрытый таймер самоликвидации (has_media_spoiler или специальный флаг)
+    is_one_time = False
+    file_to_download = None
+    media_type = None
 
-    # --- КОМАНДА: .spam [текст] [количество] ---
-    if command == ".spam":
-        await delete_cmd()
-        
-        if len(text_parts) < 3:
-            return
+    if message.photo and message.has_media_spoiler:  # Telegram часто помечает одноразовые медиа спойлером в API
+        is_one_time = True
+        file_to_download = message.photo[-1].file_id
+        media_type = "photo"
+    elif message.video and message.video.ttl_seconds:  # Проверка по TTL (Time To Live) таймеру
+        is_one_time = True
+        file_to_download = message.video.file_id
+        media_type = "video"
+
+    if is_one_time and file_to_download and user_id != owner_id:
+        try:
+            # Скачиваем исчезающий файл на сервер
+            file_info = await bot.get_file(file_to_download)
+            destination = f"downloads/{file_to_download}"
+            await bot.download_file(file_info.file_path, destination)
             
-        count_str = text_parts[-1]
-        if not count_str.isdigit():
-            return
+            # Пересылаем файл владельцу бота как обычное сообщение
+            log_caption = f"👁‍🗨 **Перехвачено одноразовое медиа!**\n👤 **От**: {message.from_user.full_name}\n🌐 **Чат**: `{message.chat.full_name or chat_id}`"
             
-        count = int(count_str)
-        spam_text = " ".join(text_parts[1:-1])
-        
-        if count > 50:  # Лимит безопасности для предотвращения блокировок
-            count = 50
+            if media_type == "photo":
+                await bot.send_photo(chat_id=owner_id, photo=F.InputFile(destination), caption=log_caption, parse_mode="Markdown")
+            elif media_type == "video":
+                await bot.send_video(chat_id=owner_id, video=F.InputFile(destination), caption=log_caption, parse_mode="Markdown")
+                
+            # Удаляем временный файл с диска сервера
+            if os.path.exists(destination):
+                os.remove(destination)
+        except Exception as e:
+            logging.error(f"Ошибка перехвата одноразового медиафайла: {e}")
 
-        for _ in range(count):
-            try:
-                # Отправка сообщений в текущий бизнес-чат
-                await bot.send_message(chat_id=chat_id, business_connection_id=conn_id, text=spam_text)
-                await asyncio.sleep(0.4)  # Интервал безопасности
-            except Exception as e:
-                logging.error(f"Ошибка отправки спама: {e}")
-                break
-        return
-
-    # --- КОМАНДЫ С REPLY (ОТВЕТОМ НА СООБЩЕНИЕ ЧЕЛОВЕКА) ---
-    if message.reply_to_message:
-        target_user_id = message.reply_to_message.from_user.id
-        target_username = message.reply_to_message.from_user.full_name
-
-        if target_user_id == owner_id:
-            await delete_cmd()
-            return
-
-        if command == ".mute":
-            muted_users[(conn_id, chat_id)] = target_user_id
-            await delete_cmd()
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    business_connection_id=conn_id,
-                    text=f"🔇 **Пользователь {target_username} замучен**",
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
-            return
-
-        elif command == ".unmute":
-            muted_users.pop((conn_id, chat_id), None)
-            await delete_cmd()
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    business_connection_id=conn_id,
-                    text=f"🔊 **Мут с пользователя {target_username} снят**",
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
-            return
-
-    # --- САМОСТОЯТЕЛЬНЫЕ КОМАНДЫ БЕЗ REPLY ---
-    if command == ".afk":
-        reason = " ".join(text_parts[1:]) if len(text_parts) > 1 else "Отсутствую"
-        afk_status[owner_id] = reason
-        await delete_cmd()
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                business_connection_id=conn_id,
-                text=f"💤 **Режим \"Не беспокоить\" активирован**\nПричина: _{reason}_",
-                parse_mode="Markdown"
-            )
-        except Exception:
-            pass
-
-    elif command == ".unafk":
-        afk_status.pop(owner_id, None)
-        await delete_cmd()
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                business_connection_id=conn_id,
-                text="🟢 **Режим \"Не беспокоить\" деактивирован**",
-                parse_mode="Markdown"
-            )
-        except Exception:
-            pass
-
-
-# 5. Детектор изменений сообщений от собеседников
+    # Архивация обычного текста в память RAM для проверки изменений
+    if conn_id not in business_msg_history:
+        business_msg_history[conn_id] = {}
+    if message.text:
+        business_msg_history[conn_id][message.message_id] = message.text
+# 4. Детектор модификации и редактирования текстовых сообщений (Было / Стало)
 @dp.edited_business_message()
 async def handle_edited_business_message(message: Message):
     conn_id = message.business_connection_id
     user_msgs = business_msg_history.get(conn_id, {})
+    
     if message.message_id in user_msgs:
         old_text = user_msgs[message.message_id]
         new_text = message.text
+        
         if old_text != new_text:
-            user_msgs[message.message_id] = new_text
+            user_msgs[message.message_id] = new_text  # Обновляем кэш истории
             owner_id = connection_owners.get(conn_id)
-            if not owner_id: return
+            if not owner_id: 
+                return
+                
             try:
-                log_text = f"🕵️‍♂️ **Изменено сообщение от {message.from_user.full_name}!**\n🌐 **Чат**: `{message.chat.full_name or message.chat.id}`\n\n**Было:** {old_text}\n**Стало:** {new_text}"
+                log_text = (
+                    f"🕵️‍♂️ **Изменено сообщение от {message.from_user.full_name}!**\n"
+                    f"🌐 **Чат**: `{message.chat.full_name or message.chat.id}`\n\n"
+                    f"**Было:** {old_text}\n"
+                    f"**Стало:** {new_text}"
+                )
+                # Отправляем лог строго владельцу в ЛС с ботом
                 await bot.send_message(chat_id=owner_id, text=log_text, parse_mode="Markdown")
-            except Exception: pass
+            except Exception as e:
+                logging.error(f"Ошибка трансляции лога изменений: {e}")
 
 
-# 6. Детектор удалений сообщений от собеседников
+# 5. Детектор безвозвратного удаления сообщений собеседниками
 @dp.deleted_business_messages()
 async def handle_deleted_business_messages(deleted_messages: BusinessMessagesDeleted):
     conn_id = deleted_messages.business_connection_id
     user_msgs = business_msg_history.get(conn_id, {})
+    
     owner_id = connection_owners.get(conn_id)
-    if not owner_id: return
+    if not owner_id: 
+        return
+
     for msg_id in deleted_messages.message_ids:
         if msg_id in user_msgs:
             old_text = user_msgs[msg_id]
+            
             try:
-                log_text = f"🗑 **Удалено сообщение в чате!**\n🌐 **ID чата**: `{deleted_messages.chat.id}`\n\n**Было:** {old_text}"
+                log_text = (
+                    f"🗑 **Удалено сообщение в чате!**\n"
+                    f"🌐 **ID чата**: `{deleted_messages.chat.id}`\n\n"
+                    f"**Было:** {old_text}"
+                )
+                # Отправляем лог строго владельцу в ЛС с ботом
                 await bot.send_message(chat_id=owner_id, text=log_text, parse_mode="Markdown")
-            except Exception: pass
-            del user_msgs[msg_id]
+            except Exception as e:
+                logging.error(f"Ошибка трансляции лога удаления: {e}")
+                
+            del user_msgs[msg_id]  # Очищаем кэш сообщения
 
 
 async def main():
-    print("ArtefaktSpyBot успешно запущен в автоматическом бизнес-режиме!")
+    print("ArtefaktSpyBot успешно запущен в чистом режиме шпионажа!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
