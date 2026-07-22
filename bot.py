@@ -2,7 +2,7 @@ import os
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection
+from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection, FSInputFile
 from aiogram.filters import CommandStart
 
 # Токен вашего @ArtefaktSpyBot из @BotFather
@@ -106,7 +106,7 @@ async def handle_business_message(message: Message):
         if file_to_download and media_type:
             try:
                 file_info = await bot.get_file(file_to_download)
-                local_path = f"media_cache/{message.message_id}_{file_to_download}"
+                local_path = f"media_cache/{message.message_id}_{file_to_download}.jpg" if media_type == "photo" else f"media_cache/{message.message_id}_{file_to_download}.mp4"
                 await bot.download_file(file_info.file_path, local_path)
                 
                 log_caption = (
@@ -117,11 +117,11 @@ async def handle_business_message(message: Message):
                 if message.caption:
                     log_caption += f"\n\n**Описание**: {message.caption}"
 
-                # Отправляем копию файла вам в чат с ботом
+                # ИСПРАВЛЕНО: Используем правильный класс FSInputFile вместо F.InputFile
                 if media_type == "photo":
-                    await bot.send_photo(chat_id=owner_id, photo=F.InputFile(local_path), caption=log_caption, parse_mode="Markdown")
+                    await bot.send_photo(chat_id=owner_id, photo=FSInputFile(local_path), caption=log_caption, parse_mode="Markdown")
                 elif media_type == "video":
-                    await bot.send_video(chat_id=owner_id, video=F.InputFile(local_path), caption=log_caption, parse_mode="Markdown")
+                    await bot.send_video(chat_id=owner_id, video=FSInputFile(local_path), caption=log_caption, parse_mode="Markdown")
 
                 # Мгновенно очищаем жесткий диск сервера от временного файла
                 if os.path.exists(local_path):
@@ -153,7 +153,7 @@ async def handle_edited_business_message(message: Message):
                 )
                 await bot.send_message(chat_id=owner_id, text=log_text, parse_mode="Markdown")
             except Exception as e:
-                logging.error(f"Ошибка трансляции лога изменений: {e}")
+                logging.error(f"Ошибка收听 лога изменений: {e}")
 
 
 # 5. Детектор безвозвратного удаления текстовых сообщений
@@ -184,7 +184,7 @@ async def handle_deleted_business_messages(deleted_messages: BusinessMessagesDel
 
 
 async def main():
-    print("ArtefaktSpyBot успешно запущен в режиме мгновенного дублирования медиа!")
+    print("ArtefaktSpyBot успешно запущен и полностью исправлен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
