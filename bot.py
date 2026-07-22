@@ -14,7 +14,7 @@ dp = Dispatcher()
 # Внутреннее хранилище в оперативной памяти сервера (RAM)
 connection_owners = {}     # Карта соответствий { business_connection_id: user_id }
 business_msg_history = {}  # Кэш истории { conn_id: { message_id: text } }
-muted_users = {}           # Списки ограничений { (chat_id/conn_id, target_id): True }
+muted_users = {}           # Списки ограничения реплик { (chat_id/conn_id, target_id): True }
 afk_status = {}            # Статусы отсутствия { user_id: reason_text }
 
 
@@ -103,18 +103,18 @@ async def handle_business_message(message: Message):
         business_msg_history[conn_id] = {}
     if message.text:
         business_msg_history[conn_id][message.message_id] = message.text
-# Универсальный хэндлер для обычных сообщений и бизнес-сообщений
+# Универсальный хэндлер для обработки префиксных точечных команд
 async def process_dot_commands(message: Message, is_business: bool = False):
     chat_id = message.chat.id
     conn_id = message.business_connection_id if is_business else None
     
     raw_text = message.text.strip()
-    text_parts = raw_text.split(maxsplit=1)
+    text_parts = raw_text.split()
     if not text_parts:
         return
         
+    # БЕЗОПАСНОЕ ИЗВЛЕЧЕНИЕ КОМАНДЫ: Извлекаем первый элемент списка и приводим к нижнему регистру
     command = text_parts[0].lower()
-    args = text_parts[1] if len(text_parts) > 1 else ""
 
     if is_business:
         owner_id = connection_owners.get(conn_id)
@@ -142,23 +142,25 @@ async def process_dot_commands(message: Message, is_business: bool = False):
         except Exception:
             pass
 
-    # --- НОВАЯ КОМАНДА: .spam [текст] [количество] ---
+    # --- ПОЛНОСТЬЮ ПЕРЕПИСАННАЯ КОМАНДА: .spam [текст] [количество] ---
     if command == ".spam":
         await delete_cmd()
-        if not args:
+        
+        # Проверяем, что ввели аргументы (минимум текст и число)
+        if len(text_parts) < 3:
             await send_status("⚠️ **Использование:** `.spam [текст] [количество]`")
             return
             
-        # Разбиваем аргументы с конца, чтобы выделить число
-        spam_parts = args.rsplit(maxsplit=1)
-        if len(spam_parts) < 2 or not spam_parts[1].isdigit():
+        # Последний элемент — это всегда количество сообщений
+        count_str = text_parts[-1]
+        if not count_str.isdigit():
             await send_status("⚠️ **Ошибка:** Укажите количество сообщений числом в конце команды.")
             return
             
-        spam_text = spam_parts[0]
-        count = int(spam_parts[1])
+        count = int(count_str)
+        # Собираем обратно текст спама (всё, что между самой командой и числом)
+        spam_text = " ".join(text_parts[1:-1])
         
-        # Ограничение безопасности против зависания сервера
         if count > 100:
             count = 100
             await send_status("🛡 **Защита:** Установлен лимит максимум 100 сообщений за один запуск.")
@@ -169,13 +171,13 @@ async def process_dot_commands(message: Message, is_business: bool = False):
                     await bot.send_message(chat_id=chat_id, business_connection_id=conn_id, text=spam_text)
                 else:
                     await bot.send_message(chat_id=chat_id, text=spam_text)
-                await asyncio.sleep(0.2)  # Задержка против Flood Wait бана
+                await asyncio.sleep(0.2)  # Безопасный интервал защиты аккаунта
             except Exception as e:
-                logging.error(f"Ошибка отправки спам-сообщения: {e}")
+                logging.error(f"Ошибка отправки спама: {e}")
                 break
         return
 
-    # --- КОМАНДЫ С REPLY ---
+    # --- КОМАНДЫ С REPLY (ОТВЕТОМ НА СООБЩЕНИЕ) ---
     if message.reply_to_message:
         target_user_id = message.reply_to_message.from_user.id
         target_username = message.reply_to_message.from_user.full_name
@@ -208,9 +210,9 @@ async def process_dot_commands(message: Message, is_business: bool = False):
                 pass
             return
 
-    # --- САМОСТОЯТЕЛЬНЫЕ КОМАНДЫ ---
+    # --- САМОСТОЯТЕЛЬНЫЕ КОМАНДЫ БЕЗ REPLY ---
     if command == ".afk":
-        reason = args if args else "Отсутствую"
+        reason = " ".join(text_parts[1:]) if len(text_parts) > 1 else "Отсутствую"
         afk_status[owner_id] = reason
         await delete_cmd()
         await send_status(f"💤 **Режим \"Не беспокоить\" активирован**\nПричина: _{reason}_")
@@ -221,7 +223,7 @@ async def process_dot_commands(message: Message, is_business: bool = False):
         await send_status("🟢 **Режим \"Не беспокоить\" деактивирован**")
 
 
-# Регистрация роутеров
+# Регистрация обработчиков входящих команд в aiogram
 @dp.business_message(F.text.startswith("."))
 async def handle_business_commands(message: Message):
     await process_dot_commands(message, is_business=True)
@@ -231,7 +233,7 @@ async def handle_regular_commands(message: Message):
     await process_dot_commands(message, is_business=False)
 
 
-# 5. Детекторы изменений
+# 5. Детектор модификации и редактирования текстовых сообщений
 @dp.edited_business_message()
 async def handle_edited_business_message(message: Message):
     conn_id = message.business_connection_id
@@ -249,7 +251,7 @@ async def handle_edited_business_message(message: Message):
             except Exception: pass
 
 
-# 6. Детекторы удалений
+# 6. Детектор безвозвратного удаления сообщений корреспондентами
 @dp.deleted_business_messages()
 async def handle_deleted_business_messages(deleted_messages: BusinessMessagesDeleted):
     conn_id = deleted_messages.business_connection_id
