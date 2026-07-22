@@ -1,187 +1,160 @@
 import os
 import asyncio
 import logging
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection
-from aiogram.filters import CommandStart
+from pyrogram import Client, filters
+from pyrogram.types import Message
 
-# Токен вашего @ArtefaktSpyBot из @BotFather
-BOT_TOKEN = "8689486048:AAFkgdmV4ZTtL8gAkfmEjWeXkrAufMM42kI"
+# Официальные вшитые ключи Telegram Desktop — работают автоматически для всех аккаунтов
+API_ID = 4
+API_HASH = "014b35b6184100b085b0b05726cf5508"
 
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
 
-# Внутреннее хранилище в оперативной памяти сервера (RAM)
-connection_owners = {}     # Карта соответствий { business_connection_id: user_id }
-business_msg_history = {}  # Кэш истории текстовых сообщений { conn_id: { message_id: text } }
+# Инициализируем клиента Pyrogram, который создаст файл сессии artefakt.session
+app = Client("artefakt_session", api_id=API_ID, api_hash=API_HASH)
 
-# Создаем временную папку для сохранения одноразовых медиафайлов
-os.makedirs("downloads", exist_ok=True)
+# Базы данных в оперативной памяти сервера для хранения истории переписок
+msg_history = {}    # { chat_id: { message_id: text } }
+media_history = {}  # { chat_id: { message_id: {"file_id": ..., "type": ..., "caption": ...} } }
 
-
-# 1. Отслеживание подключения бота к бизнес-аккаунту (Вход в 1 клик)
-@dp.business_connection()
-async def handle_business_connection(connection: BusinessConnection):
-    user_id = connection.user.id
-    conn_id = connection.id
-    
-    if connection.is_enabled:
-        connection_owners[conn_id] = user_id
-        try:
-            await bot.send_message(
-                chat_id=user_id,
-                text="🚀 **ArtefaktSpyBot успешно подключен!**\n\nЯ начал скрытый мониторинг ваших чатов. Теперь все удаленные сообщения, изменения текста и одноразовые медиафайлы (фото/видео) будут пересылаться сюда.",
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logging.error(f"Ошибка уведомления: {e}")
-    else:
-        try:
-            await bot.send_message(
-                chat_id=user_id,
-                text="⚠️ **Бот отключен от вашего аккаунта.**",
-                parse_mode="Markdown"
-            )
-            connection_owners.pop(conn_id, None)
-            business_msg_history.pop(conn_id, None)
-        except Exception as e:
-            logging.error(f"Ошибка уведомления: {e}")
+# Создаем скрытые папки для сохранения удаленного контента
+os.makedirs("cached_media", exist_ok=True)
 
 
-# 2. Приветственное сообщение при старте бота в ЛС
-@dp.message(CommandStart())
-async def cmd_start(message: Message):
-    await message.answer(
-        "👋 Привет! Я **ArtefaktSpyBot**.\n\n"
-        "Я работаю полностью в фоновом режиме через функцию **Автоматизации чатов**.\n"
-        "Просто подключите меня в настройках Telegram, и я буду присылать сюда:\n"
-        "• Удаленные сообщения\n"
-        "• Измененные сообщения (Было / Стало)\n"
-        "• Скрытые одноразовые фото и видео, которые отправляют собеседники",
-        parse_mode="Markdown"
-    )
-
-
-# 3. Базовый перехватчик входящего бизнес-потока (Сбор истории + Перехват одноразовых медиа)
-@dp.business_message()
-async def handle_business_message(message: Message):
-    conn_id = message.business_connection_id
+# 1. ОБРАБОТЧИК: Скачивание и сохранение абсолютно всех входящих сообщений (текст, фото, видео)
+@app.on_message(filters.incoming & ~filters.bot, group=0)
+async def cache_incoming_messages(client: Client, message: Message):
     chat_id = message.chat.id
-    user_id = message.from_user.id
+    msg_id = message.id
 
-    if conn_id not in connection_owners:
-        try:
-            conn_info = await bot.get_business_connection(business_connection_id=conn_id)
-            connection_owners[conn_id] = conn_info.user.id
-        except Exception as e:
-            logging.error(f"Не удалось восстановить сессию владельца: {e}")
+    # Инициализируем кэш для текущего чата, если его еще нет
+    if chat_id not in msg_history:
+        msg_history[chat_id] = {}
+    if chat_id not in media_history:
+        media_history[chat_id] = {}
 
-    owner_id = connection_owners.get(conn_id)
-    if not owner_id:
-        return
+    # Перехват и кэширование обычного текста
+    if message.text:
+        msg_history[chat_id][msg_id] = message.text
+    elif message.caption:
+        msg_history[chat_id][msg_id] = message.caption
 
-    # --- ФУНКЦИЯ ПЕРЕХВАТА ОДНОРАЗОВЫХ ФОТО И ВИДЕО (VIEW ONCE) ---
-    # Проверяем, содержит ли сообщение скрытый таймер самоликвидации (has_media_spoiler или специальный флаг)
-    is_one_time = False
-    file_to_download = None
+    # Перехват медиафайлов (включая фото, видео, голосовые и ОДНОРАЗОВЫЕ View Once)
+    file_id = None
     media_type = None
 
-    if message.photo and message.has_media_spoiler:  # Telegram часто помечает одноразовые медиа спойлером в API
-        is_one_time = True
-        file_to_download = message.photo[-1].file_id
+    if message.photo:
         media_type = "photo"
-    elif message.video and message.video.ttl_seconds:  # Проверка по TTL (Time To Live) таймеру
-        is_one_time = True
-        file_to_download = message.video.file_id
+        file_id = message.photo.file_id
+    elif message.video:
         media_type = "video"
+        file_id = message.video.file_id
+    elif message.voice:
+        media_type = "voice"
+        file_id = message.voice.file_id
+    elif message.video_note:
+        media_type = "round"
+        file_id = message.video_note.file_id
+    elif message.document:
+        media_type = "document"
+        file_id = message.document.file_id
 
-    if is_one_time and file_to_download and user_id != owner_id:
+    # Если в сообщении есть медиа, юзербот скачивает его на компьютер до того, как его удалят
+    if file_id and media_type:
         try:
-            # Скачиваем исчезающий файл на сервер
-            file_info = await bot.get_file(file_to_download)
-            destination = f"downloads/{file_to_download}"
-            await bot.download_file(file_info.file_path, destination)
-            
-            # Пересылаем файл владельцу бота как обычное сообщение
-            log_caption = f"👁‍🗨 **Перехвачено одноразовое медиа!**\n👤 **От**: {message.from_user.full_name}\n🌐 **Чат**: `{message.chat.full_name or chat_id}`"
-            
-            if media_type == "photo":
-                await bot.send_photo(chat_id=owner_id, photo=F.InputFile(destination), caption=log_caption, parse_mode="Markdown")
-            elif media_type == "video":
-                await bot.send_video(chat_id=owner_id, video=F.InputFile(destination), caption=log_caption, parse_mode="Markdown")
-                
-            # Удаляем временный файл с диска сервера
-            if os.path.exists(destination):
-                os.remove(destination)
+            # Скачиваем файл во временную защищенную папку
+            local_path = await client.download_media(message, file_name=f"cached_media/{file_id}")
+            media_history[chat_id][msg_id] = {
+                "path": local_path,
+                "type": media_type,
+                "caption": message.caption or ""
+            }
         except Exception as e:
-            logging.error(f"Ошибка перехвата одноразового медиафайла: {e}")
-
-    # Архивация обычного текста в память RAM для проверки изменений
-    if conn_id not in business_msg_history:
-        business_msg_history[conn_id] = {}
-    if message.text:
-        business_msg_history[conn_id][message.message_id] = message.text
-# 4. Детектор модификации и редактирования текстовых сообщений (Было / Стало)
-@dp.edited_business_message()
-async def handle_edited_business_message(message: Message):
-    conn_id = message.business_connection_id
-    user_msgs = business_msg_history.get(conn_id, {})
+            logging.error(f"Не удалось закэшировать входящий файл: {e}")
+# 2. ДЕТЕКТОР ИЗМЕНЕНИЙ: Срабатывает, когда собеседник отредактировал текст
+@app.on_edited_message(filters.incoming & ~filters.bot)
+async def handle_edited_messages(client: Client, message: Message):
+    chat_id = message.chat.id
+    msg_id = message.id
     
-    if message.message_id in user_msgs:
-        old_text = user_msgs[message.message_id]
-        new_text = message.text
+    user_chat_history = msg_history.get(chat_id, {})
+    if msg_id in user_chat_history:
+        old_text = user_chat_history[msg_id]
+        new_text = message.text or message.caption or "[Медиафайл]"
         
         if old_text != new_text:
-            user_msgs[message.message_id] = new_text  # Обновляем кэш истории
-            owner_id = connection_owners.get(conn_id)
-            if not owner_id: 
-                return
-                
-            try:
-                log_text = (
-                    f"🕵️‍♂️ **Изменено сообщение от {message.from_user.full_name}!**\n"
-                    f"🌐 **Чат**: `{message.chat.full_name or message.chat.id}`\n\n"
-                    f"**Было:** {old_text}\n"
-                    f"**Стало:** {new_text}"
-                )
-                # Отправляем лог строго владельцу в ЛС с ботом
-                await bot.send_message(chat_id=owner_id, text=log_text, parse_mode="Markdown")
-            except Exception as e:
-                logging.error(f"Ошибка трансляции лога изменений: {e}")
-
-
-# 5. Детектор безвозвратного удаления сообщений собеседниками
-@dp.deleted_business_messages()
-async def handle_deleted_business_messages(deleted_messages: BusinessMessagesDeleted):
-    conn_id = deleted_messages.business_connection_id
-    user_msgs = business_msg_history.get(conn_id, {})
-    
-    owner_id = connection_owners.get(conn_id)
-    if not owner_id: 
-        return
-
-    for msg_id in deleted_messages.message_ids:
-        if msg_id in user_msgs:
-            old_text = user_msgs[msg_id]
+            user_chat_history[msg_id] = new_text  # Обновляем историю в памяти
             
+            sender_name = message.from_user.first_name if message.from_user else "Пользователь"
+            log_text = (
+                f"🕵️‍♂️ **Изменено сообщение от {sender_name}!**\n"
+                f"🌐 **Чат**: `{message.chat.title or message.chat.first_name}`\n\n"
+                f"**Было:** {old_text}\n"
+                f"**Стало:** {new_text}"
+            )
+            # Отправляет отчет вам в Избранное (Saved Messages)
+            await client.send_message(chat_id="me", text=log_text)
+
+
+# 3. ДЕТЕКТОР УДАЛЕНИЙ: Перехватывает удаление сообщений (включая фото, видео и View Once)
+@app.on_deleted_messages(group=2)
+async def handle_deleted_messages(client: Client, messages: list):
+    for deleted_msg in messages:
+        chat_id = deleted_msg.chat.id
+        msg_id = deleted_msg.id
+        
+        # 1. Проверяем, было ли удалено текстовое сообщение
+        user_chat_history = msg_history.get(chat_id, {})
+        if msg_id in user_chat_history:
+            old_text = user_chat_history[msg_id]
+            log_text = (
+                f"🗑 **Удалено текстовое сообщение!**\n"
+                f"🌐 **Чат**: `{deleted_msg.chat.title or deleted_msg.chat.first_name}`\n\n"
+                f"**Было:** {old_text}"
+            )
+            await client.send_message(chat_id="me", text=log_text)
+            del user_chat_history[msg_id]
+
+        # 2. Проверяем, было ли удалено медиасообщение (фото, видео, одноразовое View Once)
+        user_media_history = media_history.get(chat_id, {})
+        if msg_id in user_media_history:
+            media_data = user_media_history[msg_id]
+            local_path = media_data["path"]
+            m_type = media_data["type"]
+            caption = media_data["caption"]
+
+            log_caption = (
+                f"🗑 **Перехвачено удаленное медиа!**\n"
+                f"🌐 **Чат**: `{deleted_messages_chat_name_stub(deleted_msg)}`"
+            )
+            if caption:
+                log_caption += f"\n\n**Описание к файлу было:** {caption}"
+
             try:
-                log_text = (
-                    f"🗑 **Удалено сообщение в чате!**\n"
-                    f"🌐 **ID чата**: `{deleted_messages.chat.id}`\n\n"
-                    f"**Было:** {old_text}"
-                )
-                # Отправляем лог строго владельцу в ЛС с ботом
-                await bot.send_message(chat_id=owner_id, text=log_text, parse_mode="Markdown")
+                # Отправляем сохраненный файл вам в Избранное в зависимости от его типа
+                if os.path.exists(local_path):
+                    if m_type == "photo":
+                        await client.send_photo(chat_id="me", photo=local_path, caption=log_caption)
+                    elif m_type == "video":
+                        await client.send_video(chat_id="me", video=local_path, caption=log_caption)
+                    elif m_type == "voice":
+                        await client.send_voice(chat_id="me", voice=local_path, caption=log_caption)
+                    elif m_type == "round":
+                        await client.send_video_note(chat_id="me", video_note=local_path)
+                    elif m_type == "document":
+                        await client.send_document(chat_id="me", document=local_path, caption=log_caption)
+                    
+                    # Полностью стираем временный файл с диска компьютера, чтобы освободить место
+                    os.remove(local_path)
             except Exception as e:
-                logging.error(f"Ошибка трансляции лога удаления: {e}")
+                logging.error(f"Не удалось переслать удаленный медиафайл: {e}")
                 
-            del user_msgs[msg_id]  # Очищаем кэш сообщения
+            del user_media_history[msg_id]
 
+def deleted_messages_chat_name_stub(msg):
+    return msg.chat.title or msg.chat.first_name or f"ID: {msg.chat.id}"
 
-async def main():
-    print("ArtefaktSpyBot успешно запущен в чистом режиме шпионажа!")
-    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("Юзербот запущен и начал скрытый перехват текстов, фото, видео и одноразовых медиа...")
+    app.run()
