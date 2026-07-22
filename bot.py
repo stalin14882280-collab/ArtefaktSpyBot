@@ -1,160 +1,200 @@
 import os
 import asyncio
 import logging
-from pyrogram import Client, filters
-from pyrogram.types import Message
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection
+from aiogram.filters import CommandStart
 
-# Официальные вшитые ключи Telegram Desktop — работают автоматически для всех аккаунтов
-API_ID = 4
-API_HASH = "014b35b6184100b085b0b05726cf5508"
+# Токен вашего @ArtefaktSpyBot из @BotFather
+BOT_TOKEN = "8689486048:AAFkgdmV4ZTtL8gAkfmEjWeXkrAufMM42kI"
 
 logging.basicConfig(level=logging.INFO)
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-# Инициализируем клиента Pyrogram, который создаст файл сессии artefakt.session
-app = Client("artefakt_session", api_id=API_ID, api_hash=API_HASH)
+# Внутреннее хранилище в оперативной памяти сервера (RAM)
+connection_owners = {}     # Карта соответствий { business_connection_id: user_id }
+business_msg_history = {}  # Кэш текстовой истории { conn_id: { message_id: text } }
+business_photo_history = {}  # Кэш файлов фото { conn_id: { message_id: file_id } }
 
-# Базы данных в оперативной памяти сервера для хранения истории переписок
-msg_history = {}    # { chat_id: { message_id: text } }
-media_history = {}  # { chat_id: { message_id: {"file_id": ..., "type": ..., "caption": ...} } }
-
-# Создаем скрытые папки для сохранения удаленного контента
-os.makedirs("cached_media", exist_ok=True)
+# Создаем папку на сервере для временного хранения фотографий
+os.makedirs("photo_cache", exist_ok=True)
 
 
-# 1. ОБРАБОТЧИК: Скачивание и сохранение абсолютно всех входящих сообщений (текст, фото, видео)
-@app.on_message(filters.incoming & ~filters.bot, group=0)
-async def cache_incoming_messages(client: Client, message: Message):
-    chat_id = message.chat.id
-    msg_id = message.id
-
-    # Инициализируем кэш для текущего чата, если его еще нет
-    if chat_id not in msg_history:
-        msg_history[chat_id] = {}
-    if chat_id not in media_history:
-        media_history[chat_id] = {}
-
-    # Перехват и кэширование обычного текста
-    if message.text:
-        msg_history[chat_id][msg_id] = message.text
-    elif message.caption:
-        msg_history[chat_id][msg_id] = message.caption
-
-    # Перехват медиафайлов (включая фото, видео, голосовые и ОДНОРАЗОВЫЕ View Once)
-    file_id = None
-    media_type = None
-
-    if message.photo:
-        media_type = "photo"
-        file_id = message.photo.file_id
-    elif message.video:
-        media_type = "video"
-        file_id = message.video.file_id
-    elif message.voice:
-        media_type = "voice"
-        file_id = message.voice.file_id
-    elif message.video_note:
-        media_type = "round"
-        file_id = message.video_note.file_id
-    elif message.document:
-        media_type = "document"
-        file_id = message.document.file_id
-
-    # Если в сообщении есть медиа, юзербот скачивает его на компьютер до того, как его удалят
-    if file_id and media_type:
-        try:
-            # Скачиваем файл во временную защищенную папку
-            local_path = await client.download_media(message, file_name=f"cached_media/{file_id}")
-            media_history[chat_id][msg_id] = {
-                "path": local_path,
-                "type": media_type,
-                "caption": message.caption or ""
-            }
-        except Exception as e:
-            logging.error(f"Не удалось закэшировать входящий файл: {e}")
-# 2. ДЕТЕКТОР ИЗМЕНЕНИЙ: Срабатывает, когда собеседник отредактировал текст
-@app.on_edited_message(filters.incoming & ~filters.bot)
-async def handle_edited_messages(client: Client, message: Message):
-    chat_id = message.chat.id
-    msg_id = message.id
+# 1. Отслеживание подключения бота к вашему аккаунту
+@dp.business_connection()
+async def handle_business_connection(connection: BusinessConnection):
+    user_id = connection.user.id
+    conn_id = connection.id
     
-    user_chat_history = msg_history.get(chat_id, {})
-    if msg_id in user_chat_history:
-        old_text = user_chat_history[msg_id]
-        new_text = message.text or message.caption or "[Медиафайл]"
+    if connection.is_enabled:
+        connection_owners[conn_id] = user_id
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text="🚀 **ArtefaktSpyBot успешно подключен!**\n\nЯ начал фоновый мониторинг чатов. Все удаленные/измененные тексты, а также удаленные фотографии будут приходить сюда.",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logging.error(f"Ошибка уведомления: {e}")
+    else:
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text="⚠️ **Бот отключен от вашего аккаунта.**",
+                parse_mode="Markdown"
+            )
+            connection_owners.pop(conn_id, None)
+            business_msg_history.pop(conn_id, None)
+            business_photo_history.pop(conn_id, None)
+        except Exception as e:
+            logging.error(f"Ошибка уведомления об отключении: {e}")
+
+
+# 2. Приветственное сообщение при старте бота в ЛС
+@dp.message(CommandStart())
+async def cmd_start(message: Message):
+    await message.answer(
+        "👋 Привет! Я **ArtefaktSpyBot**.\n\n"
+        "Я работаю полностью в фоновом режиме через функцию **Автоматизации чатов**.\n"
+        "Просто подключите меня в настройках Telegram, и я буду присылать сюда:\n"
+        "• Удаленные текстовые сообщения\n"
+        "• Измененные сообщения (Было / Стало)\n"
+        "• Удаленные собеседником фотографии",
+        parse_mode="Markdown"
+    )
+
+
+# 3. Базовый перехватчик сообщений (Сбор текстовой истории и скачивание фото на сервер)
+@dp.business_message()
+async def handle_business_message(message: Message):
+    conn_id = message.business_connection_id
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    if conn_id not in connection_owners:
+        try:
+            conn_info = await bot.get_business_connection(business_connection_id=conn_id)
+            connection_owners[conn_id] = conn_info.user.id
+        except Exception as e:
+            logging.error(f"Не удалось восстановить сессию владельца: {e}")
+
+    owner_id = connection_owners.get(conn_id)
+
+    # Инициализируем локальные словари под текущее соединение в RAM
+    if conn_id not in business_msg_history:
+        business_msg_history[conn_id] = {}
+    if conn_id not in business_photo_history:
+        business_photo_history[conn_id] = {}
+
+    # Если пришел обычный текст или описание к фото — запоминаем его
+    if message.text:
+        business_msg_history[conn_id][message.message_id] = message.text
+    elif message.caption:
+        business_msg_history[conn_id][message.message_id] = message.caption
+
+    # Если в сообщении есть ФОТОГРАФИЯ, и она пришла от собеседника (не от вас)
+    if message.photo and owner_id and user_id != owner_id:
+        try:
+            # Берем самый максимальный размер фотографии (последний элемент массива)
+            photo_file_id = message.photo[-1].file_id
+            file_info = await bot.get_file(photo_file_id)
+            
+            # Скачиваем файл в локальный кэш сервера под именем ID этого сообщения
+            local_path = f"photo_cache/{message.message_id}.jpg"
+            await bot.download_file(file_info.file_path, local_path)
+            
+            # Запоминаем путь к сохраненному файлу в кэш-таблицу
+            business_photo_history[conn_id][message.message_id] = local_path
+        except Exception as e:
+            logging.error(f"Ошибка фонового сохранения фотографии: {e}")
+# 4. Детектор модификации и редактирования сообщений от собеседников
+@dp.edited_business_message()
+async def handle_edited_business_message(message: Message):
+    conn_id = message.business_connection_id
+    user_msgs = business_msg_history.get(conn_id, {})
+    
+    if message.message_id in user_msgs:
+        old_text = user_msgs[message.message_id]
+        new_text = message.text or message.caption or "[Фотография/Файл]"
         
         if old_text != new_text:
-            user_chat_history[msg_id] = new_text  # Обновляем историю в памяти
-            
-            sender_name = message.from_user.first_name if message.from_user else "Пользователь"
-            log_text = (
-                f"🕵️‍♂️ **Изменено сообщение от {sender_name}!**\n"
-                f"🌐 **Чат**: `{message.chat.title or message.chat.first_name}`\n\n"
-                f"**Было:** {old_text}\n"
-                f"**Стало:** {new_text}"
-            )
-            # Отправляет отчет вам в Избранное (Saved Messages)
-            await client.send_message(chat_id="me", text=log_text)
-
-
-# 3. ДЕТЕКТОР УДАЛЕНИЙ: Перехватывает удаление сообщений (включая фото, видео и View Once)
-@app.on_deleted_messages(group=2)
-async def handle_deleted_messages(client: Client, messages: list):
-    for deleted_msg in messages:
-        chat_id = deleted_msg.chat.id
-        msg_id = deleted_msg.id
-        
-        # 1. Проверяем, было ли удалено текстовое сообщение
-        user_chat_history = msg_history.get(chat_id, {})
-        if msg_id in user_chat_history:
-            old_text = user_chat_history[msg_id]
-            log_text = (
-                f"🗑 **Удалено текстовое сообщение!**\n"
-                f"🌐 **Чат**: `{deleted_msg.chat.title or deleted_msg.chat.first_name}`\n\n"
-                f"**Было:** {old_text}"
-            )
-            await client.send_message(chat_id="me", text=log_text)
-            del user_chat_history[msg_id]
-
-        # 2. Проверяем, было ли удалено медиасообщение (фото, видео, одноразовое View Once)
-        user_media_history = media_history.get(chat_id, {})
-        if msg_id in user_media_history:
-            media_data = user_media_history[msg_id]
-            local_path = media_data["path"]
-            m_type = media_data["type"]
-            caption = media_data["caption"]
-
-            log_caption = (
-                f"🗑 **Перехвачено удаленное медиа!**\n"
-                f"🌐 **Чат**: `{deleted_messages_chat_name_stub(deleted_msg)}`"
-            )
-            if caption:
-                log_caption += f"\n\n**Описание к файлу было:** {caption}"
-
+            user_msgs[message.message_id] = new_text  # Обновляем кэш истории
+            owner_id = connection_owners.get(conn_id)
+            if not owner_id: 
+                return
+                
             try:
-                # Отправляем сохраненный файл вам в Избранное в зависимости от его типа
+                log_text = (
+                    f"🕵️‍♂️ **Изменено сообщение от {message.from_user.full_name}!**\n"
+                    f"🌐 **Чат**: `{message.chat.full_name or message.chat.id}`\n\n"
+                    f"**Было:** {old_text}\n"
+                    f"**Стало:** {new_text}"
+                )
+                await bot.send_message(chat_id=owner_id, text=log_text, parse_mode="Markdown")
+            except Exception as e:
+                logging.error(f"Ошибка трансляции лога изменений: {e}")
+
+
+# 5. Детектор безвозвратного удаления (Текст + Пересылка сохраненных фото из кэша)
+@dp.deleted_business_messages()
+async def handle_deleted_business_messages(deleted_messages: BusinessMessagesDeleted):
+    conn_id = deleted_messages.business_connection_id
+    user_msgs = business_msg_history.get(conn_id, {})
+    user_photos = business_photo_history.get(conn_id, {})
+    
+    owner_id = connection_owners.get(conn_id)
+    if not owner_id: 
+        return
+
+    for msg_id in deleted_messages.message_ids:
+        # Проверяем, было ли у этого сообщения сохраненное ФОТО в кэше
+        if msg_id in user_photos:
+            local_path = user_photos[msg_id]
+            caption_text = user_msgs.get(msg_id, "") # Проверяем, было ли описание к фото
+            
+            try:
                 if os.path.exists(local_path):
-                    if m_type == "photo":
-                        await client.send_photo(chat_id="me", photo=local_path, caption=log_caption)
-                    elif m_type == "video":
-                        await client.send_video(chat_id="me", video=local_path, caption=log_caption)
-                    elif m_type == "voice":
-                        await client.send_voice(chat_id="me", voice=local_path, caption=log_caption)
-                    elif m_type == "round":
-                        await client.send_video_note(chat_id="me", video_note=local_path)
-                    elif m_type == "document":
-                        await client.send_document(chat_id="me", document=local_path, caption=log_caption)
+                    log_caption = f"🗑 **Перехвачена удаленная фотография!**\n🌐 **ID чата**: `{deleted_messages.chat.id}`"
+                    if caption_text:
+                        log_caption += f"\n\n**Описание к фото было:** {caption_text}"
+                        
+                    # Отправляем сохраненный файл фотографии владельцу в ЛС
+                    await bot.send_photo(
+                        chat_id=owner_id,
+                        photo=F.InputFile(local_path),
+                        caption=log_caption,
+                        parse_mode="Markdown"
+                    )
                     
-                    # Полностью стираем временный файл с диска компьютера, чтобы освободить место
+                    # Полностью удаляем временную фотографию с диска сервера, чтобы не забивать память
                     os.remove(local_path)
             except Exception as e:
-                logging.error(f"Не удалось переслать удаленный медиафайл: {e}")
+                logging.error(f"Ошибка отправки удаленного фото: {e}")
                 
-            del user_media_history[msg_id]
+            user_photos.pop(msg_id, None)
+            user_msgs.pop(msg_id, None)
+            continue
 
-def deleted_messages_chat_name_stub(msg):
-    return msg.chat.title or msg.chat.first_name or f"ID: {msg.chat.id}"
+        # Если фото не было, проверяем стандартное текстовое сообщение
+        if msg_id in user_msgs:
+            old_text = user_msgs[msg_id]
+            try:
+                log_text = (
+                    f"🗑 **Удалено текстовое сообщение!**\n"
+                    f"🌐 **ID чата**: `{deleted_messages.chat.id}`\n\n"
+                    f"**Было:** {old_text}"
+                )
+                await bot.send_message(chat_id=owner_id, text=log_text, parse_mode="Markdown")
+            except Exception as e:
+                logging.error(f"Ошибка трансляции лога удаления: {e}")
+                
+            user_msgs.pop(msg_id, None)
 
+
+async def main():
+    print("ArtefaktSpyBot успешно запущен в режиме сохранения текстов и фотографий!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    print("Юзербот запущен и начал скрытый перехват текстов, фото, видео и одноразовых медиа...")
-    app.run()
+    asyncio.run(main())
