@@ -1,8 +1,7 @@
-import os
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection, FSInputFile
+from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection
 from aiogram.filters import CommandStart
 
 # Токен вашего @ArtefaktSpyBot из @BotFather
@@ -15,9 +14,6 @@ dp = Dispatcher()
 # Внутреннее хранилище в оперативной памяти сервера (RAM)
 connection_owners = {}     # Карта соответствий { business_connection_id: user_id }
 business_msg_history = {}  # Кэш истории текстовых сообщений { conn_id: { message_id: text } }
-
-# Создаем папку на сервере для временного сохранения медиафайлов при пересылке
-os.makedirs("media_cache", exist_ok=True)
 
 
 # 1. Отслеживание подключения бота к вашему аккаунту
@@ -63,7 +59,7 @@ async def cmd_start(message: Message):
     )
 
 
-# 3. Мгновенный перехватчик входящего потока (Дублирование фото/видео + Сбор истории)
+# 3. Мгновенный перехватчик входящего потока через метод облачного дублирования file_id
 @dp.business_message()
 async def handle_business_message(message: Message):
     conn_id = message.business_connection_id
@@ -81,7 +77,7 @@ async def handle_business_message(message: Message):
     if not owner_id:
         return
 
-    # Запись обычного текста или описания медиафайла в кэш RAM для отслеживания изменений/удалений
+    # Запись текста или описания в кэш RAM для отслеживания изменений
     if conn_id not in business_msg_history:
         business_msg_history[conn_id] = {}
     
@@ -90,44 +86,31 @@ async def handle_business_message(message: Message):
     elif message.caption:
         business_msg_history[conn_id][message.message_id] = message.caption
 
-    # МГНОВЕННЫЙ ПЕРЕХВАТ МЕДИА: Если сообщение содержит фото или видео, и оно пришло НЕ от вас
+    # МГНОВЕННЫЙ ОБЛАЧНЫЙ ПЕРЕХВАТ МЕДИА: Если сообщение содержит фото или видео, и оно пришло НЕ от вас
     if user_id != owner_id:
-        file_to_download = None
-        media_type = None
+        log_caption = (
+            f"⚡️ **Мгновенный перехват медиа!**\n"
+            f"👤 **От**: {message.from_user.full_name}\n"
+            f"🌐 **Чат**: `{message.chat.full_name or chat_id}`"
+        )
+        if message.caption:
+            log_caption += f"\n\n**Описание**: {message.caption}"
 
+        # Перехват ФОТОГРАФИЙ по облачному file_id (без скачивания на диск)
         if message.photo:
-            media_type = "photo"
-            file_to_download = message.photo[-1].file_id  # Максимальное качество
-        elif message.video:
-            media_type = "video"
-            file_to_download = message.video.file_id
-
-        # Если обнаружен медиафайл, бот скачивает и сразу пересылает его вам в ЛС
-        if file_to_download and media_type:
             try:
-                file_info = await bot.get_file(file_to_download)
-                local_path = f"media_cache/{message.message_id}_{file_to_download}.jpg" if media_type == "photo" else f"media_cache/{message.message_id}_{file_to_download}.mp4"
-                await bot.download_file(file_info.file_path, local_path)
-                
-                log_caption = (
-                    f"⚡️ **Мгновенный перехват медиа!**\n"
-                    f"👤 **От**: {message.from_user.full_name}\n"
-                    f"🌐 **Чат**: `{message.chat.full_name or chat_id}`"
-                )
-                if message.caption:
-                    log_caption += f"\n\n**Описание**: {message.caption}"
-
-                # ИСПРАВЛЕНО: Используем правильный класс FSInputFile вместо F.InputFile
-                if media_type == "photo":
-                    await bot.send_photo(chat_id=owner_id, photo=FSInputFile(local_path), caption=log_caption, parse_mode="Markdown")
-                elif media_type == "video":
-                    await bot.send_video(chat_id=owner_id, video=FSInputFile(local_path), caption=log_caption, parse_mode="Markdown")
-
-                # Мгновенно очищаем жесткий диск сервера от временного файла
-                if os.path.exists(local_path):
-                    os.remove(local_path)
+                photo_file_id = message.photo[-1].file_id
+                await bot.send_photo(chat_id=owner_id, photo=photo_file_id, caption=log_caption, parse_mode="Markdown")
             except Exception as e:
-                logging.error(f"Ошибка мгновенного перехвата медиа: {e}")
+                logging.error(f"Ошибка облачной пересылки фото: {e}")
+
+        # Перехват ВИДЕО по облачному file_id
+        elif message.video:
+            try:
+                video_file_id = message.video.file_id
+                await bot.send_video(chat_id=owner_id, video=video_file_id, caption=log_caption, parse_mode="Markdown")
+            except Exception as e:
+                logging.error(f"Ошибка облачной пересылки видео: {e}")
 # 4. Детектор модификации и редактирования сообщений от собеседников (Было / Стало)
 @dp.edited_business_message()
 async def handle_edited_business_message(message: Message):
@@ -153,7 +136,7 @@ async def handle_edited_business_message(message: Message):
                 )
                 await bot.send_message(chat_id=owner_id, text=log_text, parse_mode="Markdown")
             except Exception as e:
-                logging.error(f"Ошибка收听 лога изменений: {e}")
+                logging.error(f"Ошибка лога изменений: {e}")
 
 
 # 5. Детектор безвозвратного удаления текстовых сообщений
@@ -184,7 +167,7 @@ async def handle_deleted_business_messages(deleted_messages: BusinessMessagesDel
 
 
 async def main():
-    print("ArtefaktSpyBot успешно запущен и полностью исправлен!")
+    print("ArtefaktSpyBot успешно запущен в облачном режиме пересылки!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
