@@ -114,8 +114,7 @@ async def handle_business_connection(connection: BusinessConnection):
             connection_owners.pop(conn_id, None)
             business_msg_history.pop(conn_id, None)
         except Exception: pass
-# Приветственное сообщение при старте бота в ЛС
-# Приветственное сообщение при старте бота в ЛС (ВОЗВРАЩЕНЫ ВСЕ ФУНКЦИИ)
+# Приветственное сообщение при старте бота в ЛС (ВОЗВРАЩЕНЫ ШПИОНСКИЕ ФУНКЦИИ)
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     add_user_if_not_exists(message.from_user.id, message.from_user.first_name)
@@ -185,7 +184,7 @@ def get_game_keyboard(game_id: str, board: list, status: str) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def check_winner(b: list):
-    lines = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]]
+    lines = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6]]
     for line in lines:
         if b[line[0]] != "" and b[line[0]] == b[line[1]] == b[line[2]]: return b[line[0]]
     return "draw" if "" not in b else None
@@ -293,6 +292,7 @@ async def cmd_bonus(m: Message):
     conn.commit(); conn.close()
     await m.answer(f"🎁 Получено: **+{prize} aSpy**!", parse_mode="Markdown")
 
+# ИСПРАВЛЕНО: Заменили ошибочные m.id на правильные m.message_id
 @dp.business_message()
 async def handle_business_message(m: Message):
     conn_id = m.business_connection_id
@@ -302,24 +302,25 @@ async def handle_business_message(m: Message):
             connection_owners[conn_id] = inf.user.id
         except Exception: pass
     if conn_id not in business_msg_history: business_msg_history[conn_id] = {}
-    if m.text: business_msg_history[conn_id][m.id] = m.text
-    elif m.caption: business_msg_history[conn_id][m.id] = m.caption
+    if m.text: business_msg_history[conn_id][m.message_id] = m.text
+    elif m.caption: business_msg_history[conn_id][m.message_id] = m.caption
     oid = connection_owners.get(conn_id)
     if oid and m.from_user.id != oid:
         cap = f"⚡️ **Мгновенный перехват медиа!**\n👤 **От**: {m.from_user.full_name}"
         if m.photo: await bot.send_photo(chat_id=oid, photo=m.photo[-1].file_id, caption=cap, parse_mode="Markdown")
         elif m.video: await bot.send_video(chat_id=oid, video=m.video.file_id, caption=cap, parse_mode="Markdown")
 
+# ИСПРАВЛЕНО: Заменили ошибочные m.id на правильные m.message_id
 @dp.edited_business_message()
 async def handle_edited_business_message(m: Message):
     conn_id = m.business_connection_id
     hist = business_msg_history.get(conn_id, {})
-    if m.id in hist and hist[m.id] != m.text:
+    if m.message_id in hist and hist[m.message_id] != m.text:
         oid = connection_owners.get(conn_id)
         if oid:
             add_balance(oid, 5)
-            await bot.send_message(chat_id=oid, text=f"🕵️‍♂️ **Изменено сообщение от {m.from_user.full_name}!** (+5 aSpy)\n\n**Было:** {hist[m.id]}\n**Стало:** {m.text}", parse_mode="Markdown")
-            hist[m.id] = m.text
+            await bot.send_message(chat_id=oid, text=f"🕵️‍♂️ **Изменено сообщение от {m.from_user.full_name}!** (+5 aSpy)\n\n**Было:** {hist[m.message_id]}\n**Стало:** {m.text}", parse_mode="Markdown")
+            hist[m.message_id] = m.text
 
 @dp.deleted_business_messages()
 async def handle_deleted_business_messages(dm: BusinessMessagesDeleted):
@@ -333,7 +334,7 @@ async def handle_deleted_business_messages(dm: BusinessMessagesDeleted):
                 hist.pop(mid, None)
 
 async def main():
-    print("ArtefaktSpyBot успешно запущен во всех режимах!")
+    print("ArtefaktSpyBot запущен. Все ошибки с m.id успешно устранены!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
