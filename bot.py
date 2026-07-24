@@ -1,8 +1,13 @@
+import os
+import sqlite3
+import random
 import asyncio
 import logging
+import json
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection
-from aiogram.filters import CommandStart
+from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.filters import CommandStart, Command
 
 # Токен вашего @ArtefaktSpyBot из @BotFather
 BOT_TOKEN = "8689486048:AAFkgdmV4ZTtL8gAkfmEjWeXkrAufMM42kI"
@@ -16,158 +21,314 @@ connection_owners = {}     # Карта соответствий { business_conn
 business_msg_history = {}  # Кэш истории текстовых сообщений { conn_id: { message_id: text } }
 
 
-# 1. Отслеживание подключения бота к вашему аккаунту
+# --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ SQLITE ---
+def init_db():
+    conn = sqlite3.connect("artefakt_spy.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT DEFAULT 'Игрок',
+            balance INTEGER DEFAULT 0,
+            last_bonus TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS games (
+            game_id TEXT PRIMARY KEY,
+            chat_id INTEGER,
+            player_x INTEGER,
+            player_o INTEGER,
+            board TEXT,
+            turn TEXT,
+            status TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def add_user_if_not_exists(user_id: int, username: str = "Игрок"):
+    conn = sqlite3.connect("artefakt_spy.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO users (user_id, username) VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET username = ?
+    """, (user_id, username, username))
+    conn.commit()
+    conn.close()
+
+def get_balance(user_id: int) -> int:
+    conn = sqlite3.connect("artefakt_spy.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    res = cursor.fetchone()
+    conn.close()
+    return res[0] if res else 0
+
+def add_balance(user_id: int, amount: int):
+    conn = sqlite3.connect("artefakt_spy.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+    conn.close()
+
+
+# Фоновый таймер ожидания соперника (1 минута)
+async def wait_for_opponent(chat_id: int, message_id: int, game_id: str):
+    await asyncio.sleep(60)
+    conn = sqlite3.connect("artefakt_spy.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM games WHERE game_id = ?", (game_id,))
+    res = cursor.fetchone()
+    if res and res[0] == "waiting":
+        cursor.execute("UPDATE games SET status = 'timeout' WHERE game_id = ?", (game_id,))
+        conn.commit()
+        conn.close()
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="❌ **Соперник не найден. Попробуйте еще раз!**", parse_mode="Markdown")
+        except Exception: pass
+    else:
+        conn.close()
+
+
+# Отслеживание подключения бота к бизнес-аккаунтам
 @dp.business_connection()
 async def handle_business_connection(connection: BusinessConnection):
     user_id = connection.user.id
     conn_id = connection.id
-    
     if connection.is_enabled:
         connection_owners[conn_id] = user_id
+        add_user_if_not_exists(user_id, connection.user.first_name)
         try:
             await bot.send_message(
                 chat_id=user_id,
-                text="🚀 **ArtefaktSpyBot успешно подключен!**\n\nЯ начал мгновенный перехват. Все новые фотографии и видеоролики из ваших чатов будут сразу же дублироваться сюда. Удаленные и измененные тексты также фиксируются.",
+                text="🚀 **ArtefaktSpyBot успешно подключен!**\n\nМониторинг запущен. Проверить кошелек можно командой `/bal`, посмотреть лидеров — `/baltop`.",
                 parse_mode="Markdown"
             )
-        except Exception as e:
-            logging.error(f"Ошибка уведомления: {e}")
+        except Exception: pass
     else:
         try:
-            await bot.send_message(
-                chat_id=user_id,
-                text="⚠️ **Бот отключен от вашего аккаунта.**",
-                parse_mode="Markdown"
-            )
+            await bot.send_message(chat_id=user_id, text="⚠️ **Бот отключен от вашего аккаунта.**", parse_mode="Markdown")
             connection_owners.pop(conn_id, None)
             business_msg_history.pop(conn_id, None)
-        except Exception as e:
-            logging.error(f"Ошибка уведомления об отключении: {e}")
-
-
-# 2. Приветственное сообщение при старте бота в ЛС
+        except Exception: pass
+# Приветственное сообщение при старте бота в ЛС
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
+    add_user_if_not_exists(message.from_user.id, message.from_user.first_name)
     await message.answer(
         "👋 Привет! Я **ArtefaktSpyBot**.\n\n"
-        "Я работаю полностью автоматически через функцию **Автоматизации чатов**.\n"
-        "Просто подключите меня в настройках Telegram, и я буду присылать сюда:\n"
-        "• ⚡️ **Мгновенные копии всех фото и видео** (сразу при отправке собеседником)\n"
-        "• Удаленные текстовые сообщения\n"
-        "• Измененные сообщения (Было / Стало)",
+        "💰 **Экономические команды:**\n"
+        "• `/bal` — Проверить баланс кошелька **aSpy**\n"
+        "• `/baltop` — Топ-10 богатых шпионов по балансу аспаев\n"
+        "• `/bonus` — Получить ежедневную награду\n\n"
+        "🎮 **Игровой модуль:**\n"
+        "• `/game` — Запустить Крестики-нолики на аспаи",
         parse_mode="Markdown"
     )
 
 
-# 3. Мгновенный перехватчик входящего потока через метод облачного дублирования file_id
-@dp.business_message()
-async def handle_business_message(message: Message):
-    conn_id = message.business_connection_id
-    chat_id = message.chat.id
+# Команда /bal и .bal (вывод личного баланса игрока)
+@dp.message(Command("bal"))
+@dp.message(F.text.lower().in_(["/bal", ".bal", "баланс"]))
+async def cmd_balance(message: Message):
     user_id = message.from_user.id
+    add_user_if_not_exists(user_id, message.from_user.first_name)
+    bal = get_balance(user_id)
+    await message.answer(f"💰 Ваш текущий баланс: **{bal} aSpy**", parse_mode="Markdown")
 
+
+# Команда /baltop и .baltop (Вывод топ-10 игроков сервера)
+@dp.message(Command("baltop"))
+@dp.message(F.text.lower().in_(["/baltop", ".baltop", "топ"]))
+async def cmd_baltop(message: Message):
+    conn = sqlite3.connect("artefakt_spy.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, username, balance FROM users ORDER BY balance DESC LIMIT 10")
+    leaders = cursor.fetchall()
+    conn.close()
+    
+    if not leaders:
+        return await message.answer("📋 Список лидеров пока пуст.")
+        
+    top_text = "🏆 **ТОП-10 ИГРОКОВ ПО БАЛАНСУ aSpy** 🏆\n\n"
+    for index, leader in enumerate(leaders, start=1):
+        user_id, username, balance = leader
+        medal = "🥇" if index == 1 else ("🥈" if index == 2 else ("🥉" if index == 3 else f"*{index}.*"))
+        name = username if username else f"ID: {user_id}"
+        top_text += f"{medal} {name} — **{balance} aSpy**\n"
+        
+    await message.answer(top_text, parse_mode="Markdown")
+
+
+# --- МОДУЛЬ КРЕСТИКОВ-НОЛИКОВ ---
+def get_game_keyboard(game_id: str, board: list, status: str) -> InlineKeyboardMarkup:
+    buttons = []
+    if status == "waiting":
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🤝 Вступить в игру (за О)", callback_data=f"ttt_join:{game_id}")]])
+    for i in range(3):
+        row = []
+        for j in range(3):
+            index = i * 3 + j
+            cell = board[index]
+            text = " " if cell == "" else ("❌" if cell == "X" else "⭕️")
+            cb_data = "ttt_noop" if (cell != "" or status == "ended") else f"ttt_hit:{game_id}:{index}"
+            row.append(InlineKeyboardButton(text=text, callback_data=cb_data))
+        buttons.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def check_winner(b: list):
+    lines = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]]
+    for line in lines:
+        if b[line[0]] != "" and b[line[0]] == b[line[1]] == b[line[2]]: return b[line[0]]
+    return "draw" if "" not in b else None
+
+@dp.message(Command("game"))
+@dp.message(F.text.lower().in_(["/game", ".game"]))
+async def start_game(message: Message):
+    chat_id, user_id, user_name = message.chat.id, message.from_user.id, message.from_user.first_name
+    game_id = f"g_{chat_id}_{message.message_id}"
+    add_user_if_not_exists(user_id, user_name)
+    board = [""] * 9
+    conn = sqlite3.connect("artefakt_spy.db")
+    cursor = conn.cursor()
+    if message.chat.type == "private":
+        cursor.execute("INSERT INTO games VALUES (?, ?, ?, ?, ?, ?, ?)", (game_id, chat_id, user_id, bot.id, json.dumps(board), "X", "playing"))
+        conn.commit(); conn.close()
+        await message.answer(f"🎮 **Игра началась!** Ваш ход (❌):", reply_markup=get_game_keyboard(game_id, board, "playing"), parse_mode="Markdown")
+    else:
+        cursor.execute("INSERT INTO games VALUES (?, ?, ?, ?, ?, ?, ?)", (game_id, chat_id, user_id, None, json.dumps(board), "X", "waiting"))
+        conn.commit(); conn.close()
+        sent_msg = await message.answer(f"🎮 Игрок **{user_name}** создал матч в Крестики-нолики на аспаи!\nУ соперника есть **1 минута**, чтобы зайти в игру.", reply_markup=get_game_keyboard(game_id, board, "waiting"), parse_mode="Markdown")
+        asyncio.create_task(wait_for_opponent(chat_id=chat_id, message_id=sent_msg.message_id, game_id=game_id))
+@dp.callback_query(F.data.startswith("ttt_join:"))
+async def callback_ttt_join(callback: CallbackQuery):
+    game_id = callback.data.split(":")[1]
+    user_id, user_name = callback.from_user.id, callback.from_user.first_name
+    conn = sqlite3.connect("artefakt_spy.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT player_x, status, board FROM games WHERE game_id = ?", (game_id,))
+    res = cursor.fetchone()
+    if not res: conn.close(); return await callback.answer("Игра не найдена.", show_alert=True)
+    player_x, status, board_json = res
+    if status == "timeout": conn.close(); return await callback.answer("Время ожидания соперника истекло!", show_alert=True)
+    if user_id == player_x: conn.close(); return await callback.answer("Нельзя играть против самого себя!", show_alert=True)
+    add_user_if_not_exists(user_id, user_name)
+    board = json.loads(board_json)
+    cursor.execute("UPDATE games SET player_o = ?, status = 'playing' WHERE game_id = ?", (user_id, game_id))
+    conn.commit(); conn.close()
+    await callback.answer("Вы вступили в игру!")
+    await callback.message.edit_text(f"🎮 Игра началась!\n❌ Ходит первый игрок. ⭕️ Ожидает **{user_name}**.", reply_markup=get_game_keyboard(game_id, board, "playing"))
+
+@dp.callback_query(F.data.startswith("ttt_hit:"))
+async def callback_ttt_hit(callback: CallbackQuery):
+    _, game_id, cell_index = callback.data.split(":")
+    cell_index, user_id = int(cell_index), callback.from_user.id
+    conn = sqlite3.connect("artefakt_spy.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT player_x, player_o, board, turn, status FROM games WHERE game_id = ?", (game_id,))
+    game = cursor.fetchone()
+    if not game or game[4] != "playing": conn.close(); return await callback.answer("Игра завершена.")
+    player_x, player_o, board_json, turn, status = game
+    board = json.loads(board_json)
+    if (turn == "X" and user_id != player_x) or (turn == "O" and user_id != player_o): conn.close(); return await callback.answer("Сейчас не ваш ход!", show_alert=True)
+    board[cell_index] = turn
+    next_turn = "O" if turn == "X" else "X"
+    win_state = check_winner(board)
+    if win_state:
+        cursor.execute("UPDATE games SET board = ?, status = 'ended' WHERE game_id = ?", (json.dumps(board), game_id))
+        conn.commit(); conn.close()
+        if win_state == "draw":
+            if player_x: add_balance(player_x, 30)
+            if player_o and player_o != bot.id: add_balance(player_o, 30)
+            msg = "🤝 **Ничья!** Оба игрока получают по **+30 aSpy**."
+        else:
+            winner = player_x if win_state == "X" else player_o
+            loser = player_o if win_state == "X" else player_x
+            if winner: add_balance(winner, 100)
+            if loser and loser != bot.id: add_balance(loser, -100)
+            msg = f"🎉 Победил знак {win_state}! Выигрыш: **+100 aSpy**, проигрыш: **-100 aSpy**."
+        return await callback.message.edit_text(f"🏁 **Игра завершена!**\n\n{msg}", reply_markup=get_game_keyboard(game_id, board, "ended"), parse_mode="Markdown")
+    if player_o == bot.id and next_turn == "O":
+        empty_cells = [i for i, cell in enumerate(board) if cell == ""]
+        board[random.choice(empty_cells)] = "O"
+        win_state = check_winner(board)
+        if win_state:
+            cursor.execute("UPDATE games SET board = ?, status = 'ended' WHERE game_id = ?", (json.dumps(board), game_id))
+            conn.commit(); conn.close()
+            msg = "🤝 **Ничья с Ботом!** (+30 aSpy)" if win_state == "draw" else "🤖 **Бот выиграл!** Вы потеряли **-100 aSpy**."
+            if win_state == "draw": add_balance(player_x, 30)
+            else: add_balance(player_x, -100)
+            return await callback.message.edit_text(f"🏁 **Игра завершена!**\n\n{msg}", reply_markup=get_game_keyboard(game_id, board, "ended"), parse_mode="Markdown")
+        next_turn = "X"
+    cursor.execute("UPDATE games SET board = ?, turn = ? WHERE game_id = ?", (json.dumps(board), next_turn, game_id))
+    conn.commit(); conn.close(); await callback.answer()
+    await callback.message.edit_text(f"🎮 Игра продолжается. Ход за: **{next_turn}**", reply_markup=get_game_keyboard(game_id, board, "playing"))
+
+@dp.callback_query(F.data == "ttt_noop")
+async def ttt_noop(c: CallbackQuery): await c.answer()
+
+@dp.message(Command("bonus"))
+@dp.message(F.text.lower().in_(["/bonus", ".bonus", "бонус"]))
+async def cmd_bonus(m: Message):
+    uid = m.from_user.id
+    add_user_if_not_exists(uid, m.from_user.first_name)
+    conn = sqlite3.connect("artefakt_spy.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT last_bonus FROM users WHERE user_id = ?", (uid,))
+    res = cursor.fetchone()
+    now = datetime.now()
+    if res and res[0] and now < datetime.strptime(res[0], "%Y-%m-%d %H:%M:%S") + timedelta(days=1):
+        conn.close()
+        return await m.answer("⏳ Бонус доступен раз в 24 часа.", parse_mode="Markdown")
+    prize = random.randint(10, 50)
+    cursor.execute("UPDATE users SET balance = balance + ?, last_bonus = ? WHERE user_id = ?", (prize, now.strftime("%Y-%m-%d %H:%M:%S"), uid))
+    conn.commit(); conn.close()
+    await m.answer(f"🎁 Получено: **+{prize} aSpy**!", parse_mode="Markdown")
+
+@dp.business_message()
+async def handle_business_message(m: Message):
+    conn_id = m.business_connection_id
     if conn_id not in connection_owners:
         try:
-            conn_info = await bot.get_business_connection(business_connection_id=conn_id)
-            connection_owners[conn_id] = conn_info.user.id
-        except Exception as e:
-            logging.error(f"Не удалось восстановить сессию владельца: {e}")
+            inf = await bot.get_business_connection(business_connection_id=conn_id)
+            connection_owners[conn_id] = inf.user.id
+        except Exception: pass
+    if conn_id not in business_msg_history: business_msg_history[conn_id] = {}
+    if m.text: business_msg_history[conn_id][m.id] = m.text
+    elif m.caption: business_msg_history[conn_id][m.id] = m.caption
+    oid = connection_owners.get(conn_id)
+    if oid and m.from_user.id != oid:
+        cap = f"⚡️ **Мгновенный перехват медиа!**\n👤 **От**: {m.from_user.full_name}"
+        if m.photo: await bot.send_photo(chat_id=oid, photo=m.photo[-1].file_id, caption=cap, parse_mode="Markdown")
+        elif m.video: await bot.send_video(chat_id=oid, video=m.video.file_id, caption=cap, parse_mode="Markdown")
 
-    owner_id = connection_owners.get(conn_id)
-    if not owner_id:
-        return
-
-    # Запись текста или описания в кэш RAM для отслеживания изменений
-    if conn_id not in business_msg_history:
-        business_msg_history[conn_id] = {}
-    
-    if message.text:
-        business_msg_history[conn_id][message.message_id] = message.text
-    elif message.caption:
-        business_msg_history[conn_id][message.message_id] = message.caption
-
-    # МГНОВЕННЫЙ ОБЛАЧНЫЙ ПЕРЕХВАТ МЕДИА: Если сообщение содержит фото или видео, и оно пришло НЕ от вас
-    if user_id != owner_id:
-        log_caption = (
-            f"⚡️ **Мгновенный перехват медиа!**\n"
-            f"👤 **От**: {message.from_user.full_name}\n"
-            f"🌐 **Чат**: `{message.chat.full_name or chat_id}`"
-        )
-        if message.caption:
-            log_caption += f"\n\n**Описание**: {message.caption}"
-
-        # Перехват ФОТОГРАФИЙ по облачному file_id (без скачивания на диск)
-        if message.photo:
-            try:
-                photo_file_id = message.photo[-1].file_id
-                await bot.send_photo(chat_id=owner_id, photo=photo_file_id, caption=log_caption, parse_mode="Markdown")
-            except Exception as e:
-                logging.error(f"Ошибка облачной пересылки фото: {e}")
-
-        # Перехват ВИДЕО по облачному file_id
-        elif message.video:
-            try:
-                video_file_id = message.video.file_id
-                await bot.send_video(chat_id=owner_id, video=video_file_id, caption=log_caption, parse_mode="Markdown")
-            except Exception as e:
-                logging.error(f"Ошибка облачной пересылки видео: {e}")
-# 4. Детектор модификации и редактирования сообщений от собеседников (Было / Стало)
 @dp.edited_business_message()
-async def handle_edited_business_message(message: Message):
-    conn_id = message.business_connection_id
-    user_msgs = business_msg_history.get(conn_id, {})
-    
-    if message.message_id in user_msgs:
-        old_text = user_msgs[message.message_id]
-        new_text = message.text or message.caption or "[Медиафайл]"
-        
-        if old_text != new_text:
-            user_msgs[message.message_id] = new_text  # Обновляем кэш истории
-            owner_id = connection_owners.get(conn_id)
-            if not owner_id: 
-                return
-                
-            try:
-                log_text = (
-                    f"🕵️‍♂️ **Изменено сообщение от {message.from_user.full_name}!**\n"
-                    f"🌐 **Чат**: `{message.chat.full_name or message.chat.id}`\n\n"
-                    f"**Было:** {old_text}\n"
-                    f"**Стало:** {new_text}"
-                )
-                await bot.send_message(chat_id=owner_id, text=log_text, parse_mode="Markdown")
-            except Exception as e:
-                logging.error(f"Ошибка лога изменений: {e}")
+async def handle_edited_business_message(m: Message):
+    conn_id = m.business_connection_id
+    hist = business_msg_history.get(conn_id, {})
+    if m.id in hist and hist[m.id] != m.text:
+        oid = connection_owners.get(conn_id)
+        if oid:
+            add_balance(oid, 5)
+            await bot.send_message(chat_id=oid, text=f"🕵️‍♂️ **Изменено сообщение от {m.from_user.full_name}!** (+5 aSpy)\n\n**Было:** {hist[m.id]}\n**Стало:** {m.text}", parse_mode="Markdown")
+            hist[m.id] = m.text
 
-
-# 5. Детектор безвозвратного удаления текстовых сообщений
 @dp.deleted_business_messages()
-async def handle_deleted_business_messages(deleted_messages: BusinessMessagesDeleted):
-    conn_id = deleted_messages.business_connection_id
-    user_msgs = business_msg_history.get(conn_id, {})
-    
-    owner_id = connection_owners.get(conn_id)
-    if not owner_id: 
-        return
-
-    for msg_id in deleted_messages.message_ids:
-        if msg_id in user_msgs:
-            old_text = user_msgs[msg_id]
-            
-            try:
-                log_text = (
-                    f"🗑 **Удалено текстовое сообщение!**\n"
-                    f"🌐 **ID чата**: `{deleted_messages.chat.id}`\n\n"
-                    f"**Было:** {old_text}"
-                )
-                await bot.send_message(chat_id=owner_id, text=log_text, parse_mode="Markdown")
-            except Exception as e:
-                logging.error(f"Ошибка трансляции лога удаления: {e}")
-                
-            user_msgs.pop(msg_id, None)  # Очищаем память
-
+async def handle_deleted_business_messages(dm: BusinessMessagesDeleted):
+    hist = business_msg_history.get(dm.business_connection_id, {})
+    oid = connection_owners.get(dm.business_connection_id)
+    if oid:
+        for mid in dm.message_ids:
+            if mid in hist:
+                add_balance(oid, 5)
+                await bot.send_message(chat_id=oid, text=f"🗑 **Удалено сообщение!** (+5 aSpy)\n\n**Было:** {hist[mid]}", parse_mode="Markdown")
+                hist.pop(mid, None)
 
 async def main():
-    print("ArtefaktSpyBot успешно запущен в облачном режиме пересылки!")
+    print("ArtefaktSpyBot успешно запущен во всех режимах!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
