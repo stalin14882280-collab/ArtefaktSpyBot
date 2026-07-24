@@ -167,21 +167,23 @@ def get_game_keyboard(game_id: str, board: list, status: str) -> InlineKeyboardM
         buttons.append(row)
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+# ИСПРАВЛЕНО: Восстановлены все выигрышные комбинации для индексов поля 3х3
 def check_winner(b: list):
-    lines = [,,,,,,,]
+    lines = [, [3, 4, 5], [6, 7, 8],  # Горизонтальные линии, [1, 4, 7], [2, 5, 8],  # Вертикальные линии, [2, 4, 6]              # Диагональные линии
+    ]
     for line in lines:
-        if b[line] != "" and b[line] == b[line] == b[line]: return b[line]
+        if b[line[0]] != "" and b[line[0]] == b[line[1]] == b[line[2]]: 
+            return b[line[0]]
     return "draw" if "" not in b else None
 
 
-# ИСПРАВЛЕНО: Команда /game теперь выдает ошибку в ЛС бота
+# Команда /game выдает ошибку в ЛС бота
 @dp.message(Command("game"))
 @dp.message(F.text.lower().in_(["/game", ".game"]))
 async def start_game(message: Message):
     chat_id, user_id, user_name = message.chat.id, message.from_user.id, message.from_user.first_name
     add_user_if_not_exists(user_id, user_name)
     
-    # Если команду ввели в Личных Сообщениях с ботом
     if message.chat.type == "private":
         await message.answer(
             "⚠️ **Ошибка:** кажется, вы находитесь одни в группе. Попробуйте команду /gamebot (игра с ботом):",
@@ -189,7 +191,6 @@ async def start_game(message: Message):
         )
         return
 
-    # Если команду ввели в группе — ищем реального оппонента
     game_id = f"g_{chat_id}_{message.message_id}"
     board = [""] * 9
     conn = sqlite3.connect("artefakt_spy.db")
@@ -201,7 +202,7 @@ async def start_game(message: Message):
     asyncio.create_task(wait_for_opponent(chat_id=chat_id, message_id=sent_msg.message_id, game_id=game_id))
 
 
-# НОВАЯ КОМАНДА: /gamebot (работает везде, запускает матч строго против ИИ бота)
+# Команда /gamebot (игра строго против ИИ бота)
 @dp.message(Command("gamebot"))
 @dp.message(F.text.lower().in_(["/gamebot", ".gamebot"]))
 async def start_game_bot(message: Message):
@@ -212,7 +213,6 @@ async def start_game_bot(message: Message):
     board = [""] * 9
     conn = sqlite3.connect("artefakt_spy.db")
     cursor = conn.cursor()
-    # player_o сразу жестко прописывается как ID бота
     cursor.execute("INSERT INTO games VALUES (?, ?, ?, ?, ?, ?, ?)", (game_id, chat_id, user_id, bot.id, json.dumps(board), "X", "playing"))
     conn.commit(); conn.close()
     
