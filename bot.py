@@ -110,10 +110,10 @@ async def wait_for_opponent(chat_id: int, message_id: int, game_id: str):
     await asyncio.sleep(60)
     conn = sqlite3.connect("artefakt_spy.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT status FROM games WHERE game_id = ?", (game_id,))
+    cursor.execute("SELECT status FROM games WHERE game_id = ?", (str(game_id),))
     res = cursor.fetchone()
     if res and res[0] == "waiting":
-        cursor.execute("UPDATE games SET status = 'timeout' WHERE game_id = ?", (game_id,))
+        cursor.execute("UPDATE games SET status = 'timeout' WHERE game_id = ?", (str(game_id),))
         conn.commit()
         conn.close()
         try:
@@ -266,7 +266,6 @@ def get_game_keyboard(game_id: str, board: list, status: str) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-# СТРОГОЕ ИСПРАВЛЕНИЕ: Неубиваемый текстовый парсер выигрышных линий
 def check_winner(b: list):
     lines_string = "0,1,2;3,4,5;6,7,8;0,3,6;1,4,7;2,5,8;0,4,8;2,4,6"
     lines = [[int(x) for x in group.split(",")] for group in lines_string.split(";")]
@@ -305,31 +304,49 @@ async def start_game_bot(message: Message):
     cursor.execute("INSERT INTO games VALUES (?, ?, ?, ?, ?, ?, ?)", (game_id, chat_id, user_id, bot.id, json.dumps(board), "X", "playing"))
     conn.commit(); conn.close()
     await message.answer(f"🤖 **Матч против бота запущен!** Ваш ход (❌):", reply_markup=get_game_keyboard(game_id, board, "playing"), parse_mode="Markdown")
+# ИСПРАВЛЕНО: Безопасное извлечение game_id из коллбэка без превращения строки в list
 @dp.callback_query(F.data.startswith("ttt_join:"))
 async def callback_ttt_join(callback: CallbackQuery):
-    game_id = callback.data.split(":")
-    user_id, user_name = callback.from_user.id, callback.from_user.first_name
+    data_parts = callback.data.split(":")
+    game_id = data_parts[1]  # Берем ЧИСТУЮ СТРОКУ, а не весь массив
+    user_id = callback.from_user.id
+    user_name = callback.from_user.first_name
+    
     conn = sqlite3.connect("artefakt_spy.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT player_x, status, board FROM games WHERE game_id = ?", (game_id,))
+    cursor.execute("SELECT player_x, status, board FROM games WHERE game_id = ?", (str(game_id),))
     res = cursor.fetchone()
-    if not res: conn.close(); return await callback.answer("Игра не найдена.")
+    
+    if not res: 
+        conn.close()
+        return await callback.answer("Игра не найдена.")
+        
     player_x, status, board_json = res
-    if str(status) == "timeout": conn.close(); return await callback.answer("Время истекло!", show_alert=True)
-    if user_id == player_x: conn.close(); return await callback.answer("Нельзя играть с собой!", show_alert=True)
+    
+    # СТРОГАЯ ЗАЩИТА: Бот больше не упадет, а выдаст корректный alert в приложении
+    if user_id == player_x: 
+        conn.close()
+        return await callback.answer("❌ Вы не можете играть против самого себя!", show_alert=True)
+        
+    if str(status) == "timeout": 
+        conn.close()
+        return await callback.answer("Время истекло!", show_alert=True)
+        
     add_user_if_not_exists(user_id, user_name)
     board = json.loads(board_json)
-    cursor.execute("UPDATE games SET player_o = ?, status = 'playing' WHERE game_id = ?", (user_id, game_id))
-    conn.commit(); conn.close(); await callback.answer()
+    cursor.execute("UPDATE games SET player_o = ?, status = 'playing' WHERE game_id = ?", (user_id, str(game_id)))
+    conn.commit(); conn.close()
+    await callback.answer("Вы успешно вступили в игру!")
     await callback.message.edit_text(f"🎮 Игра началась! Ходит ❌.", reply_markup=get_game_keyboard(game_id, board, "playing"))
 
 @dp.callback_query(F.data.startswith("ttt_hit:"))
 async def callback_ttt_hit(callback: CallbackQuery):
-    _, game_id, cell_index = callback.data.split(":")
-    cell_index, user_id = int(cell_index), callback.from_user.id
+    data_parts = callback.data.split(":")
+    game_id, cell_index = data_parts[1], int(data_parts[2])
+    user_id = callback.from_user.id
     conn = sqlite3.connect("artefakt_spy.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT player_x, player_o, board, turn, status FROM games WHERE game_id = ?", (game_id,))
+    cursor.execute("SELECT player_x, player_o, board, turn, status FROM games WHERE game_id = ?", (str(game_id),))
     game = cursor.fetchone()
     if not game: conn.close(); return await callback.answer("Игра не найдена.")
     player_x, player_o, board_json, turn, status = game
@@ -341,7 +358,7 @@ async def callback_ttt_hit(callback: CallbackQuery):
     next_turn = "O" if turn == "X" else "X"
     win_state = check_winner(board)
     if win_state:
-        cursor.execute("UPDATE games SET board = ?, status = 'ended' WHERE game_id = ?", (json.dumps(board), game_id))
+        cursor.execute("UPDATE games SET board = ?, status = 'ended' WHERE game_id = ?", (json.dumps(board), str(game_id)))
         p_x_name, p_o_name = get_username(player_x), get_username(player_o)
         res_text = "Ничья" if win_state == "draw" else f"Победил {win_state}"
         cursor.execute("INSERT INTO game_logs (player_x_name, player_o_name, result, date) VALUES (?, ?, ?, ?)", (p_x_name, p_o_name, res_text, datetime.now().strftime("%d.%m %H:%M")))
@@ -364,7 +381,7 @@ async def callback_ttt_hit(callback: CallbackQuery):
             board[random.choice(empty_cells)] = "O"
             win_state = check_winner(board)
             if win_state:
-                cursor.execute("UPDATE games SET board = ?, status = 'ended' WHERE game_id = ?", (json.dumps(board), game_id))
+                cursor.execute("UPDATE games SET board = ?, status = 'ended' WHERE game_id = ?", (json.dumps(board), str(game_id)))
                 p_x_name = get_username(player_x)
                 res_text = "Ничья" if win_state == "draw" else "Выиграл Бот"
                 cursor.execute("INSERT INTO game_logs (player_x_name, player_o_name, result, date) VALUES (?, ?, ?, ?)", (p_x_name, "ArtefaktBot", res_text, datetime.now().strftime("%d.%m %H:%M")))
@@ -374,7 +391,7 @@ async def callback_ttt_hit(callback: CallbackQuery):
                 else: add_balance(player_x, -100)
                 return await callback.message.edit_text(f"🏁 **Игра завершена!**\n\n{msg}", reply_markup=get_game_keyboard(game_id, board, "ended"), parse_mode="Markdown")
         next_turn = "X"
-    cursor.execute("UPDATE games SET board = ?, turn = ? WHERE game_id = ?", (json.dumps(board), next_turn, game_id))
+    cursor.execute("UPDATE games SET board = ?, turn = ? WHERE game_id = ?", (json.dumps(board), next_turn, str(game_id)))
     conn.commit(); conn.close(); await callback.answer()
     await callback.message.edit_text(f"🎮 Ход за значком: **{next_turn}**", reply_markup=get_game_keyboard(game_id, board, "playing"))
 
@@ -382,7 +399,6 @@ async def callback_ttt_hit(callback: CallbackQuery):
 async def ttt_noop(c: CallbackQuery): await c.answer("Ячейка занята!")
 
 
-# СТРОГОЕ ИСПРАВЛЕНИЕ: res[0] вместо res полностью убрало ошибку TypeError
 @dp.message(Command("bonus"))
 @dp.message(F.text.lower().in_(["/bonus", ".bonus", "бонус"]))
 async def cmd_bonus(m: Message):
@@ -442,7 +458,7 @@ async def handle_deleted_business_messages(dm: BusinessMessagesDeleted):
                 hist.pop(mid, None)
 
 async def main():
-    print("ArtefaktSpyBot запущен. Ошибка TypeError полностью ликвидирована!")
+    print("ArtefaktSpyBot успешно обновлен. Ошибки списков устранены!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
