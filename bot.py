@@ -167,15 +167,13 @@ def get_game_keyboard(game_id: str, board: list, status: str) -> InlineKeyboardM
         buttons.append(row)
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
-# СТРОГОЕ ИСПРАВЛЕНИЕ: Полностью восстановлены все 8 выигрышных линий поля
 def check_winner(b: list):
-    lines = [, [3, 4, 5], [6, 7, 8],  # Горизонтальные линии, [1, 4, 7], [2, 5, 8],  # Вертикальные линии, [2, 4, 6]              # Диагональные линии
-    ]
+    lines = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6]]
     for line in lines:
         if b[line[0]] != "" and b[line[0]] == b[line[1]] == b[line[2]]: 
             return b[line[0]]
     return "draw" if "" not in b else None
+
 
 
 # Команда /game выдает ошибку в ЛС бота
