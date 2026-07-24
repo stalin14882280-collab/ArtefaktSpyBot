@@ -115,15 +115,20 @@ async def handle_business_connection(connection: BusinessConnection):
             business_msg_history.pop(conn_id, None)
         except Exception: pass
 # Приветственное сообщение при старте бота в ЛС
+# Приветственное сообщение при старте бота в ЛС (ВОЗВРАЩЕНЫ ВСЕ ФУНКЦИИ)
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     add_user_if_not_exists(message.from_user.id, message.from_user.first_name)
     await message.answer(
         "👋 Привет! Я **ArtefaktSpyBot**.\n\n"
+        "🕵️‍♂️ **Шпионский модуль (работает в фоне):**\n"
+        "• Перехватываю и сохраняю удаленные текстовые сообщения\n"
+        "• Фиксирую любые изменения текста в формате (Было / Стало)\n"
+        "• Мгновенно дублирую все входящие фото и видеоролики из ваших чатов\n\n"
         "💰 **Экономические команды:**\n"
         "• `/bal` — Проверить баланс кошелька **aSpy**\n"
         "• `/baltop` — Топ-10 богатых шпионов по балансу аспаев\n"
-        "• `/bonus` — Получить ежедневную награду\n\n"
+        "• `/bonus` — Получить ежедневную награду (+ заработок по **+5 aSpy** за каждое удаление/изменение)\n\n"
         "🎮 **Игровой модуль:**\n"
         "• `/game` — Запустить Крестики-нолики на аспаи",
         parse_mode="Markdown"
