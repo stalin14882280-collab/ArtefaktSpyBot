@@ -266,10 +266,10 @@ def get_game_keyboard(game_id: str, board: list, status: str) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def check_winner(b: list):
-    lines = [, [3, 4, 5], [6, 7, 8],
-, [1, 4, 7], [2, 5, 8],
-, [2, 4, 6]
-    ]
+    # Кодируем линии текстом, чтобы разметка мессенджера ничего не ломала
+    lines_string = "0,1,2;3,4,5;6,7,8;0,3,6;1,4,7;2,5,8;0,4,8;2,4,6"
+    lines = [[int(x) for x in group.split(",")] for group in lines_string.split(";")]
+    
     for line in lines:
         if b[line[0]] != "" and b[line[0]] == b[line[1]] == b[line[2]]: 
             return b[line[0]]
