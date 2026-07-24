@@ -65,7 +65,7 @@ def get_balance(user_id: int) -> int:
     cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
     res = cursor.fetchone()
     conn.close()
-    return res[0] if res else 0
+    return res if res else 0
 
 def add_balance(user_id: int, amount: int):
     conn = sqlite3.connect("artefakt_spy.db")
@@ -82,7 +82,7 @@ async def wait_for_opponent(chat_id: int, message_id: int, game_id: str):
     cursor = conn.cursor()
     cursor.execute("SELECT status FROM games WHERE game_id = ?", (game_id,))
     res = cursor.fetchone()
-    if res and res[0] == "waiting":
+    if res and res == "waiting":
         cursor.execute("UPDATE games SET status = 'timeout' WHERE game_id = ?", (game_id,))
         conn.commit()
         conn.close()
@@ -91,8 +91,6 @@ async def wait_for_opponent(chat_id: int, message_id: int, game_id: str):
         except Exception: pass
     else:
         conn.close()
-
-
 # Отслеживание подключения бота к бизнес-аккаунтам
 @dp.business_connection()
 async def handle_business_connection(connection: BusinessConnection):
@@ -102,49 +100,40 @@ async def handle_business_connection(connection: BusinessConnection):
         connection_owners[conn_id] = user_id
         add_user_if_not_exists(user_id, connection.user.first_name)
         try:
-            await bot.send_message(
-                chat_id=user_id,
-                text="🚀 **ArtefaktSpyBot успешно подключен!**\n\nМониторинг запущен. Проверить кошелек можно командой `/bal`, посмотреть лидеров — `/baltop`.",
-                parse_mode="Markdown"
-            )
+            await bot.send_message(chat_id=user_id, text="🚀 **ArtefaktSpyBot успешно подключен!**", parse_mode="Markdown")
         except Exception: pass
     else:
         try:
-            await bot.send_message(chat_id=user_id, text="⚠️ **Бот отключен от вашего аккаунта.**", parse_mode="Markdown")
             connection_owners.pop(conn_id, None)
             business_msg_history.pop(conn_id, None)
         except Exception: pass
-# Приветственное сообщение при старте бота в ЛС (ВОЗВРАЩЕНЫ ШПИОНСКИЕ ФУНКЦИИ)
+
+
+# Приветственное сообщение
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     add_user_if_not_exists(message.from_user.id, message.from_user.first_name)
     await message.answer(
         "👋 Привет! Я **ArtefaktSpyBot**.\n\n"
-        "🕵️‍♂️ **Шпионский модуль (работает в фоне):**\n"
-        "• Перехватываю и сохраняю удаленные текстовые сообщения\n"
-        "• Фиксирую любые изменения текста в формате (Было / Стало)\n"
-        "• Мгновенно дублирую все входящие фото и видеоролики из ваших чатов\n\n"
-        "💰 **Экономические команды:**\n"
-        "• `/bal` — Проверить баланс кошелька **aSpy**\n"
-        "• `/baltop` — Топ-10 богатых шпионов по балансу аспаев\n"
-        "• `/bonus` — Получить ежедневную награду (+ заработок по **+5 aSpy** за каждое удаление/изменение)\n\n"
+        "💰 **Экономика:**\n"
+        "• `/bal` — Баланс кошелька\n"
+        "• `/baltop` — Топ-10 игроков\n"
+        "• `/bonus` — Ежедневный бонус\n\n"
         "🎮 **Игровой модуль:**\n"
-        "• `/game` — Запустить Крестики-нолики на аспаи",
+        "• `/game` — Игра с реальным соперником (только в группах)\n"
+        "• `/gamebot` — Одиночная игра против бота (работает везде)",
         parse_mode="Markdown"
     )
 
 
-# Команда /bal и .bal (вывод личного баланса игрока)
+# Команды проверки баланса и топа лидирующих игроков
 @dp.message(Command("bal"))
 @dp.message(F.text.lower().in_(["/bal", ".bal", "баланс"]))
 async def cmd_balance(message: Message):
     user_id = message.from_user.id
     add_user_if_not_exists(user_id, message.from_user.first_name)
-    bal = get_balance(user_id)
-    await message.answer(f"💰 Ваш текущий баланс: **{bal} aSpy**", parse_mode="Markdown")
+    await message.answer(f"💰 Ваш текущий баланс: **{get_balance(user_id)} aSpy**", parse_mode="Markdown")
 
-
-# Команда /baltop и .baltop (Вывод топ-10 игроков сервера)
 @dp.message(Command("baltop"))
 @dp.message(F.text.lower().in_(["/baltop", ".baltop", "топ"]))
 async def cmd_baltop(message: Message):
@@ -153,21 +142,16 @@ async def cmd_baltop(message: Message):
     cursor.execute("SELECT user_id, username, balance FROM users ORDER BY balance DESC LIMIT 10")
     leaders = cursor.fetchall()
     conn.close()
-    
-    if not leaders:
-        return await message.answer("📋 Список лидеров пока пуст.")
-        
+    if not leaders: return await message.answer("📋 Список лидеров пока пуст.")
     top_text = "🏆 **ТОП-10 ИГРОКОВ ПО БАЛАНСУ aSpy** 🏆\n\n"
     for index, leader in enumerate(leaders, start=1):
         user_id, username, balance = leader
         medal = "🥇" if index == 1 else ("🥈" if index == 2 else ("🥉" if index == 3 else f"*{index}.*"))
-        name = username if username else f"ID: {user_id}"
-        top_text += f"{medal} {name} — **{balance} aSpy**\n"
-        
+        top_text += f"{medal} {username or f'ID: {user_id}'} — **{balance} aSpy**\n"
     await message.answer(top_text, parse_mode="Markdown")
 
 
-# --- МОДУЛЬ КРЕСТИКОВ-НОЛИКОВ ---
+# --- МОДУЛЬ ЗАПУСКА ИГРЫ КРЕСТИКИ-НОЛИКИ ---
 def get_game_keyboard(game_id: str, board: list, status: str) -> InlineKeyboardMarkup:
     buttons = []
     if status == "waiting":
@@ -184,32 +168,58 @@ def get_game_keyboard(game_id: str, board: list, status: str) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def check_winner(b: list):
-    lines = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6]]
+    lines = [,,,,,,,]
     for line in lines:
-        if b[line[0]] != "" and b[line[0]] == b[line[1]] == b[line[2]]: return b[line[0]]
+        if b[line] != "" and b[line] == b[line] == b[line]: return b[line]
     return "draw" if "" not in b else None
 
+
+# ИСПРАВЛЕНО: Команда /game теперь выдает ошибку в ЛС бота
 @dp.message(Command("game"))
 @dp.message(F.text.lower().in_(["/game", ".game"]))
 async def start_game(message: Message):
     chat_id, user_id, user_name = message.chat.id, message.from_user.id, message.from_user.first_name
-    game_id = f"g_{chat_id}_{message.message_id}"
     add_user_if_not_exists(user_id, user_name)
+    
+    # Если команду ввели в Личных Сообщениях с ботом
+    if message.chat.type == "private":
+        await message.answer(
+            "⚠️ **Ошибка:** кажется, вы находитесь одни в группе. Попробуйте команду /gamebot (игра с ботом):",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Если команду ввели в группе — ищем реального оппонента
+    game_id = f"g_{chat_id}_{message.message_id}"
     board = [""] * 9
     conn = sqlite3.connect("artefakt_spy.db")
     cursor = conn.cursor()
-    if message.chat.type == "private":
-        cursor.execute("INSERT INTO games VALUES (?, ?, ?, ?, ?, ?, ?)", (game_id, chat_id, user_id, bot.id, json.dumps(board), "X", "playing"))
-        conn.commit(); conn.close()
-        await message.answer(f"🎮 **Игра началась!** Ваш ход (❌):", reply_markup=get_game_keyboard(game_id, board, "playing"), parse_mode="Markdown")
-    else:
-        cursor.execute("INSERT INTO games VALUES (?, ?, ?, ?, ?, ?, ?)", (game_id, chat_id, user_id, None, json.dumps(board), "X", "waiting"))
-        conn.commit(); conn.close()
-        sent_msg = await message.answer(f"🎮 Игрок **{user_name}** создал матч в Крестики-нолики на аспаи!\nУ соперника есть **1 минута**, чтобы зайти в игру.", reply_markup=get_game_keyboard(game_id, board, "waiting"), parse_mode="Markdown")
-        asyncio.create_task(wait_for_opponent(chat_id=chat_id, message_id=sent_msg.message_id, game_id=game_id))
+    cursor.execute("INSERT INTO games VALUES (?, ?, ?, ?, ?, ?, ?)", (game_id, chat_id, user_id, None, json.dumps(board), "X", "waiting"))
+    conn.commit(); conn.close()
+    
+    sent_msg = await message.answer(f"🎮 Игрок **{user_name}** создал матч!\nУ соперника есть **1 минута**, чтобы зайти в игру.", reply_markup=get_game_keyboard(game_id, board, "waiting"), parse_mode="Markdown")
+    asyncio.create_task(wait_for_opponent(chat_id=chat_id, message_id=sent_msg.message_id, game_id=game_id))
+
+
+# НОВАЯ КОМАНДА: /gamebot (работает везде, запускает матч строго против ИИ бота)
+@dp.message(Command("gamebot"))
+@dp.message(F.text.lower().in_(["/gamebot", ".gamebot"]))
+async def start_game_bot(message: Message):
+    chat_id, user_id, user_name = message.chat.id, message.from_user.id, message.from_user.first_name
+    add_user_if_not_exists(user_id, user_name)
+    
+    game_id = f"g_{chat_id}_{message.message_id}"
+    board = [""] * 9
+    conn = sqlite3.connect("artefakt_spy.db")
+    cursor = conn.cursor()
+    # player_o сразу жестко прописывается как ID бота
+    cursor.execute("INSERT INTO games VALUES (?, ?, ?, ?, ?, ?, ?)", (game_id, chat_id, user_id, bot.id, json.dumps(board), "X", "playing"))
+    conn.commit(); conn.close()
+    
+    await message.answer(f"🤖 **Матч против ArtefaktBot запущен!** Ваш ход (❌):", reply_markup=get_game_keyboard(game_id, board, "playing"), parse_mode="Markdown")
 @dp.callback_query(F.data.startswith("ttt_join:"))
 async def callback_ttt_join(callback: CallbackQuery):
-    game_id = callback.data.split(":")[1]
+    game_id = callback.data.split(":")
     user_id, user_name = callback.from_user.id, callback.from_user.first_name
     conn = sqlite3.connect("artefakt_spy.db")
     cursor = conn.cursor()
@@ -223,7 +233,7 @@ async def callback_ttt_join(callback: CallbackQuery):
     board = json.loads(board_json)
     cursor.execute("UPDATE games SET player_o = ?, status = 'playing' WHERE game_id = ?", (user_id, game_id))
     conn.commit(); conn.close()
-    await callback.answer("Вы вступили в игру!")
+    await callback.answer()
     await callback.message.edit_text(f"🎮 Игра началась!\n❌ Ходит первый игрок. ⭕️ Ожидает **{user_name}**.", reply_markup=get_game_keyboard(game_id, board, "playing"))
 
 @dp.callback_query(F.data.startswith("ttt_hit:"))
@@ -234,7 +244,7 @@ async def callback_ttt_hit(callback: CallbackQuery):
     cursor = conn.cursor()
     cursor.execute("SELECT player_x, player_o, board, turn, status FROM games WHERE game_id = ?", (game_id,))
     game = cursor.fetchone()
-    if not game or game[4] != "playing": conn.close(); return await callback.answer("Игра завершена.")
+    if not game or game != "playing": conn.close(); return await callback.answer("Игра завершена.")
     player_x, player_o, board_json, turn, status = game
     board = json.loads(board_json)
     if (turn == "X" and user_id != player_x) or (turn == "O" and user_id != player_o): conn.close(); return await callback.answer("Сейчас не ваш ход!", show_alert=True)
@@ -284,7 +294,7 @@ async def cmd_bonus(m: Message):
     cursor.execute("SELECT last_bonus FROM users WHERE user_id = ?", (uid,))
     res = cursor.fetchone()
     now = datetime.now()
-    if res and res[0] and now < datetime.strptime(res[0], "%Y-%m-%d %H:%M:%S") + timedelta(days=1):
+    if res and res and now < datetime.strptime(res, "%Y-%m-%d %H:%M:%S") + timedelta(days=1):
         conn.close()
         return await m.answer("⏳ Бонус доступен раз в 24 часа.", parse_mode="Markdown")
     prize = random.randint(10, 50)
@@ -292,7 +302,6 @@ async def cmd_bonus(m: Message):
     conn.commit(); conn.close()
     await m.answer(f"🎁 Получено: **+{prize} aSpy**!", parse_mode="Markdown")
 
-# ИСПРАВЛЕНО: Заменили ошибочные m.id на правильные m.message_id
 @dp.business_message()
 async def handle_business_message(m: Message):
     conn_id = m.business_connection_id
@@ -310,7 +319,6 @@ async def handle_business_message(m: Message):
         if m.photo: await bot.send_photo(chat_id=oid, photo=m.photo[-1].file_id, caption=cap, parse_mode="Markdown")
         elif m.video: await bot.send_video(chat_id=oid, video=m.video.file_id, caption=cap, parse_mode="Markdown")
 
-# ИСПРАВЛЕНО: Заменили ошибочные m.id на правильные m.message_id
 @dp.edited_business_message()
 async def handle_edited_business_message(m: Message):
     conn_id = m.business_connection_id
@@ -334,7 +342,7 @@ async def handle_deleted_business_messages(dm: BusinessMessagesDeleted):
                 hist.pop(mid, None)
 
 async def main():
-    print("ArtefaktSpyBot запущен. Все ошибки с m.id успешно устранены!")
+    print("ArtefaktSpyBot успешно запущен со всеми исправлениями разделения игр!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
