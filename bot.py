@@ -266,9 +266,13 @@ def get_game_keyboard(game_id: str, board: list, status: str) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def check_winner(b: list):
-    lines = [,,,,,,,]
+    lines = [, [3, 4, 5], [6, 7, 8],
+, [1, 4, 7], [2, 5, 8],
+, [2, 4, 6]
+    ]
     for line in lines:
-        if b[line] != "" and b[line] == b[line] == b[line]: return b[line]
+        if b[line[0]] != "" and b[line[0]] == b[line[1]] == b[line[2]]: 
+            return b[line[0]]
     return "draw" if "" not in b else None
 
 
